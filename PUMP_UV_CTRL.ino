@@ -1,0 +1,712 @@
+/**
+ * @file dynamic_rpm_pump_controller.ino
+ * @brief 統合・改良版 ポンプ＆UVランプコントローラー (ハードウェア自動検知版)
+ * @version 20250910_R2 (Revision 2)
+ *
+ * @details
+ * 起動時にハードウェアのピン設定を読み取り、回転数制御モードを自動で切り替えます。
+ *
+ * [回転数モードの切り替え方法]
+ * - ピン42とGNDをショート  : 手動回転数モード(可変抵抗による)。 解放でNORMAL_MAX_RPMで動作 
+ * - ピン43とGNDをショート  : 電流しきい値可変モード(可変抵抗による)。解放で固定しきい値(PUMP_CURRENT_THRESHOLD_DEFAULTで動作)
+ * [UVランプモデルの自動検出]
+ * - ピンA3からA6ピンで本数を２進数表現  15本までプログラム上では実装可能
+ * 例 :           A6 A5 A4 A3
+ *      0本の場合  0  0  0  0  → 0本
+ *      2本の場合  0  0  1  0  → 2本
+ *      4本の場合  0  1  0  0  → 4本
+ *     12本の場合  1  1  0  0  → 12本
+ * [注意]ピン42, 43, A3～A7はプルアップ抵抗内蔵のINPUT_PULLUPモードで使用してください。
+ */
+#define DEBUG_MODE          // デバッグ用シリアル出力を有効にする場合はコメントアウトを外す
+const char* FirmwareVersion = "20250916_R1";
+// ----------------------------------------------------------------
+// ▼▼▼ 動作設定 ▼▼▼
+// ----------------------------------------------------------------
+// 固定回転数モードで動作する場合の回転数を設定します。
+const int NORMAL_MAX_RPM = 2500;        // 固定回転数モードでの最大回転数
+const int PRIMING_DURATION_SEC = 5;     // プライミングを行う時間（秒）
+const float HOLD_DURATION_SEC = 1.0;    // 最高回転数での保持時間（秒）
+const int PRIMING_MAX_RPM      = 2500;  // プライミング中の最大回転数
+const int PRIMING_MIN_RPM      = 2000;  // プライミング中の最小回転数
+const float PRIMING_CYCLE_SEC = 4.0;    // プライミングの1サイクルの時間（秒）
+// 回転数モードを判定するためのピン番号
+const int MANUAL_RPM_MODE_PIN = 42;     // アナログダイヤルで回転数可変にする場合このピンをGNDに落とす
+
+// ポンプの電流閾値可変モードにするピン番号
+const int MANUAL_THRESHOLD_MODE_PIN = 43;  // アナログダイヤルで閾値調整する場合このピンをGNDに落とす
+
+// ----------------------------------------------------------------
+// ライブラリのインクルード
+// ----------------------------------------------------------------
+#include <FlexiTimer2.h>
+#include <math.h> // ← この行を追加
+#include "TM1637.h"
+#include "general.h" // デバッグマクロ包含
+// 【変更点】UVコントロール用のヘッダファイルをインクルード
+#include "uv_control.h"
+// ----------------------------------------------------------------
+// ピン定義
+// ----------------------------------------------------------------
+const int PIN_CLK1          = 12, PIN_DIO1              = 13; 
+const int PIN_CLK2          = 14, PIN_DIO2              = 15; 
+const int PIN_CLK3          = 16, PIN_DIO3              = 17;
+const int P_SW_START_PIN    = 2 , P_SW_STOP_PIN         = 3;
+const int P_LAMP_PIN        = 4;
+const int EM_LAMP_PIN = 8;      // 非常停止ランプ (EM_LAMP_PIN) 接続ピン
+const int T_CNT_PIN         = 9; // ★★★ T_CNT_PINの定義をこちらに移動 ★★★
+const int LED_PUMP_RUN_PIN  = 45, LED_PUMP_STOP_PIN     = 46; // 操作盤の稼働灯・停止灯 現在ハード未実装
+const int LED_ISR_PIN       = 49, LED_SERIAL_RX_PIN     = 50;
+const int RPM_ANALOG_IN_PIN = 0 ;       // 回転数調整ダイヤル可変抵抗 (ポテンショメーター) 接続ピン
+const int CURRENT_ANALOG_IN_PIN = 1;    // ポンプの電流センサー接続ピン
+const int THRESHOLD_ANALOG_IN_PIN = 2;  // [変更点] 電流しきい値調整用のダイヤル可変抵抗を接続するアナログピン
+
+// UVランプ装着数自動検知用のピン定義（4ビットバイナリ）
+const int UV_DETECT_BIT0_PIN = A3; // 1加算 (2^0)
+const int UV_DETECT_BIT1_PIN = A4; // 2加算 (2^1)
+const int UV_DETECT_BIT2_PIN = A5; // 4加算 (2^2)
+const int UV_DETECT_BIT3_PIN = A6; // 8加算 (2^3)
+// ----------------------------------------------------------------
+// グローバル変数
+// ----------------------------------------------------------------
+enum SystemState { STATE_STOPPED, STATE_RUNNING };
+SystemState pumpState = STATE_STOPPED;
+const int SERIAL_BAUD_RATE    = 2400;
+const int TIMER_INTERVAL_MS   = 50;           // タイマー割り込み間隔 (ms)
+const int DEBOUNCE_DELAY_MS   = 50;           // スイッチのチャタリング防止時間 (ms)
+const unsigned long PUMP_TIMEOUT_SEC  = 60;   // 起動後ポンプ電流判断までの待機時間 (秒)
+const int PUMP_CURRENT_THRESHOLD_DEFAULT = 512; // デフォルトのポンプ電流しきい値
+int PUMP_CURRENT_THRESHOLD      = PUMP_CURRENT_THRESHOLD_DEFAULT;  // ポンプ運転を判断する電流のしきい値
+const int COMMAND_INTERVAL_MS = 300;          // コマンド送信間隔 (ms)
+// [変更点] 実行時に決定される回転数制御モードを格納する変数
+enum varControlMode { MODE_VOLUME, MODE_FIXED };
+varControlMode rpmControlMode;
+varControlMode currThresholdCntMode; // [変更点] 電流しきい値可変モード
+
+unsigned long pumpStartTime = 0;
+volatile bool processFlag = false;
+int rpm_value = 0;
+int lastCurrentPeak = 512;
+int detectedLamps = 0;              // 検出したランプ数を格納する変数
+
+TM1637 tm1(PIN_CLK1, PIN_DIO1);
+TM1637 tm2(PIN_CLK2, PIN_DIO2);
+TM1637 tm3(PIN_CLK3, PIN_DIO3);
+
+// ▼▼▼ ここから追加 ▼▼▼ 2025年9月16日 インバーターからの受信用
+// インバーターからの応答データ受信バッファ
+const int INVERTER_RESPONSE_SIZE = 13; // 仕様書より応答データは13バイト
+byte inverterResponseBuffer[INVERTER_RESPONSE_SIZE];
+int responseByteCount = 0;
+// ▲▲▲ ここまで追加 ▲▲▲
+
+struct Switch {
+  const int pin;
+  int lastReading, stableState;
+  unsigned long lastDebounceTime;
+};
+Switch pumpStartSwitch = {P_SW_START_PIN, HIGH, HIGH, 0};
+Switch pumpStopSwitch  = {P_SW_STOP_PIN,  HIGH, HIGH, 0};
+
+// プロトタイプ宣言
+void initializePins();            // ピンの初期化
+void initializeDisplays();        // TM1637ディスプレイの初期化
+void timerInterrupt();            // タイマー割り込み処理
+// bool isButtonPressed(Switch &sw); // スイッチのチャタリング防止付き押下検出
+void handleSwitchInputs();        // スイッチ入力処理
+void updateSystemState();         // ポンプとUVランプの状態更新
+void updateDisplays();            // 3桁表示のため、1000以上は999として表示
+void handleSerialCommunication(); // シリアルからのコマンド受信可否によるLED点灯消灯
+void handlePeriodicTasks();       // タイマー処理でトリガーされる定期処理（コマンド送信、ピーク電流測定）
+void measurePeakCurrent();        // ポンプのピーク電流を測定
+int getTargetRpm();               // 目標回転数を取得
+int calculateRpmFromVolume();     // 可変抵抗から回転数を計算
+void trim(char* str);             // 文字列の前後の空白を削除
+void updateCurrentThreshold();    // しきい値を更新する関数のプロトタイプ宣言
+void updateTCntPin();             // ★★★ T_CNT_PINを制御する関数のプロトタイプ宣言 ★★★
+void runStartupLedSequence(int);     // 起動時のLEDシーケンス
+
+// ----------------------------------------------------------------
+// setup() - 初期化処理
+// ----------------------------------------------------------------
+void setup() {
+  Serial.begin(SERIAL_BAUD_RATE);
+  DEBUG_PRINTLN("--- System Start ---");
+
+  // [変更点] 起動時にハードウェア設定を読み込み、RPM制御モードを決定
+  pinMode(MANUAL_RPM_MODE_PIN, INPUT_PULLUP);
+  delay(5); // プルアップが安定するのを待つ
+
+  // --- UVランプモデルの自動検出 ---
+  // --- UVランプモデルの自動検出 (4ビットバイナリ) ---
+  pinMode(UV_DETECT_BIT0_PIN, INPUT_PULLUP);
+  pinMode(UV_DETECT_BIT1_PIN, INPUT_PULLUP);
+  pinMode(UV_DETECT_BIT2_PIN, INPUT_PULLUP);
+  pinMode(UV_DETECT_BIT3_PIN, INPUT_PULLUP);
+  delay(5); // プルアップが安定するのを待つ
+
+  // 4つのピンの状態を読み取り、2進数としてランプ数を計算
+  detectedLamps = 0; // いったん0に初期化
+  if (digitalRead(UV_DETECT_BIT0_PIN) == LOW) { detectedLamps += 1; } // 1の位
+  if (digitalRead(UV_DETECT_BIT1_PIN) == LOW) { detectedLamps += 2; } // 2の位
+  if (digitalRead(UV_DETECT_BIT2_PIN) == LOW) { detectedLamps += 4; } // 4の位
+  if (digitalRead(UV_DETECT_BIT3_PIN) == LOW) { detectedLamps += 8; } // 8の位
+
+  DEBUG_PRINT("UV Lamp Bits (8,4,2,1): ");
+  DEBUG_PRINT(digitalRead(UV_DETECT_BIT3_PIN) == LOW ? "1" : "0");
+  DEBUG_PRINT(digitalRead(UV_DETECT_BIT2_PIN) == LOW ? "1" : "0");
+  DEBUG_PRINT(digitalRead(UV_DETECT_BIT1_PIN) == LOW ? "1" : "0");
+  DEBUG_PRINT(digitalRead(UV_DETECT_BIT0_PIN) == LOW ? "1" : "0");
+  DEBUG_PRINT(" -> Detected Lamps: ");
+  DEBUG_PRINTLN(detectedLamps);
+
+  if (digitalRead(MANUAL_RPM_MODE_PIN) == LOW) {
+    rpmControlMode = MODE_VOLUME;
+  } else {
+    rpmControlMode = MODE_FIXED;
+  }
+  pinMode(MANUAL_THRESHOLD_MODE_PIN, INPUT_PULLUP); // [変更点] しきい値調整フラグ用ピンの初期化
+  delay(5); // プルアップが安定するのを待つ
+  if(digitalRead(MANUAL_THRESHOLD_MODE_PIN) == LOW) {
+    DEBUG_PRINTLN("Current Threshold Adjustment: ENABLED");
+    currThresholdCntMode = MODE_VOLUME;
+  } else {
+    DEBUG_PRINTLN("Current Threshold Adjustment: DISABLED");
+    currThresholdCntMode = MODE_FIXED;
+  }
+
+  DEBUG_PRINT("Firmware: ");
+  DEBUG_PRINT(FirmwareVersion);
+  if (rpmControlMode == MODE_VOLUME) {
+    DEBUG_PRINTLN(" (RPM Control: Volume)");
+  } else {
+    DEBUG_PRINTLN(" (RPM Control: Fixed)");
+  }
+  
+  initializePins();
+  // 検出したランプの数を渡して、UVモジュールを初期化
+  // detectedLampsが0なら、uv_setupは何もしない
+  uv_setup(detectedLamps); 
+  
+  initializeDisplays();
+
+  FlexiTimer2::set(TIMER_INTERVAL_MS, timerInterrupt);
+  FlexiTimer2::start();
+  runStartupLedSequence(detectedLamps); // LEDの起動シーケンスを実行
+  DEBUG_PRINTLN("Initialization complete. Starting main loop.");
+}
+
+// ----------------------------------------------------------------
+// loop() - メインループ
+// ----------------------------------------------------------------
+void loop() {
+  updateCurrentThreshold();     // [変更点] 毎ループ、可変抵抗の値を読み込んでしきい値を更新
+  handleSwitchInputs();         // スイッチ入力処理
+  updateSystemState();          // ポンプの状態更新
+
+  uv_loop_task(); // UV機能のループ処理を呼び出す
+
+  updateTCntPin();              // ★★★ T_CNT_PINの状態を更新 ★★★
+  updateDisplays();             // 3桁表示のため、1000以上は999として表示
+  handleSerialCommunication();  // シリアルからのコマンド受信可否によるLED点灯消灯
+  handlePeriodicTasks();        // タイマー処理でトリガーされる定期処理（コマンド送信、ピーク電流測定）
+
+}
+
+// ================================================================
+// 機能別関数
+// ================================================================
+
+// ★★★ T_CNT_PINの出力を制御する新設関数 ★★★
+void updateTCntPin() {
+  bool isPumpRunning = (pumpState == STATE_RUNNING);
+  bool isUvRunning = false;
+
+  isUvRunning = is_uv_running(); // UV制御モジュールから状態を取得
+
+
+  if (isPumpRunning || isUvRunning) {
+    digitalWrite(T_CNT_PIN, HIGH);
+  } else {
+    digitalWrite(T_CNT_PIN, LOW);
+  }
+}
+
+// [変更点] 電流しきい値を可変抵抗から読み取り更新する関数
+void updateCurrentThreshold() {
+  if(currThresholdCntMode == MODE_FIXED) {
+    // ピンが開放されている場合、しきい値調整を行わない
+    PUMP_CURRENT_THRESHOLD = PUMP_CURRENT_THRESHOLD_DEFAULT; // デフォルト値に戻す
+  } else {
+    // ピンがGNDに接続されている場合、可変抵抗からしきい値を読み取る
+    int sensorValue = analogRead(THRESHOLD_ANALOG_IN_PIN);
+    // analogReadの値(0-1023)を、しきい値の範囲(例: 550-950)に変換する
+    // この範囲は実際の運用に合わせて調整してください。
+    PUMP_CURRENT_THRESHOLD = map(sensorValue, 0, 1023, 500, 950);
+  }
+}
+
+// ピンの初期化
+void initializePins() {
+  pinMode(P_SW_START_PIN, INPUT_PULLUP);
+  pinMode(P_SW_STOP_PIN, INPUT_PULLUP);
+  pinMode(EM_LAMP_PIN, OUTPUT);
+  pinMode(P_LAMP_PIN, OUTPUT);
+  pinMode(LED_PUMP_RUN_PIN, OUTPUT);
+  pinMode(LED_PUMP_STOP_PIN, OUTPUT);
+  pinMode(LED_ISR_PIN, OUTPUT);
+  pinMode(LED_SERIAL_RX_PIN, OUTPUT);
+  pinMode(T_CNT_PIN, OUTPUT); // ★★★ T_CNT_PINの初期化をこちらに移動 ★★★
+  delay(5);
+  digitalWrite(T_CNT_PIN, LOW);// ★★★ 初期状態はLOW ★★★
+
+  digitalWrite(LED_PUMP_STOP_PIN, HIGH);
+}
+
+// TM1637ディスプレイの初期化
+void initializeDisplays() {
+  tm1.init();
+  tm1.set(BRIGHT_TYPICAL);
+  tm1.clearDisplay();
+  tm2.init();
+  tm2.set(BRIGHT_TYPICAL);
+  tm2.clearDisplay();
+  tm3.init();
+  tm3.set(BRIGHT_TYPICAL);
+  tm3.clearDisplay();
+}
+
+// チャタリング防止付きスイッチ押下検出
+bool isButtonPressed(Switch &sw) {
+  int currentReading = digitalRead(sw.pin);
+  if (currentReading != sw.lastReading) {
+    sw.lastDebounceTime = millis();
+  }
+  
+  if ((millis() - sw.lastDebounceTime) > DEBOUNCE_DELAY_MS) {
+    if (currentReading != sw.stableState) {
+      sw.stableState = currentReading;
+      if (sw.stableState == LOW) {
+        sw.lastReading = currentReading;
+        return true;
+      } 
+    } 
+  } 
+  
+  sw.lastReading = currentReading;
+  return false;
+}
+// ▼▼▼ ここから追加 ▼▼▼ 2025年9月16日 インバーターに停止コマンドを送信する関数
+/**
+ * @brief インバーターに停止コマンド（回転数0）を送信する
+ */
+void sendStopCommand() {
+  byte stop_command[8] = {0x00, 0x01, 0x10, 0x02, 0x00, 0x01, 0x00, 0x00};
+  byte sum = 0;
+  for(int i=0; i < 7; i++) {
+    sum += stop_command[i];
+  }
+  stop_command[7] = 0x55 - sum; // チェックサムを計算
+  Serial.write(stop_command, 8);
+  DEBUG_PRINTLN("Sent: Stop Command to Inverter");
+}
+// ▲▲▲ ここまで追加 ▲▲▲
+
+/**
+ * @brief ポンプを停止させる（状態変更とコマンド送信）
+ */
+void stopPump() {
+  if (pumpState != STATE_RUNNING) return; // すでに停止している場合は何もしない
+
+  pumpState = STATE_STOPPED;
+  sendStopCommand(); // 新しい関数を呼び出す 2025年9月16日
+  
+  DEBUG_PRINTLN("Pump Stop Sequence Executed.");
+}
+
+// スイッチ検出処理
+void handleSwitchInputs() {
+  if (isButtonPressed(pumpStartSwitch)) {
+    if (pumpState == STATE_STOPPED) {
+      // pumpState = STATE_RUNNING;
+      // pumpStartTime = millis();
+      DEBUG_PRINTLN("Pump Start Switch ON");
+      // ▼▼▼ ここから変更 ▼▼▼ 2025年9月16日
+      // 起動前に一度停止コマンドを送り、インバーターの状態をリセットする
+      DEBUG_PRINTLN("Sending pre-start stop command to clear inverter state.");
+      sendStopCommand();
+      delay(50); // コマンド送信の間隔を少し空ける
+      
+      pumpState = STATE_RUNNING;
+      pumpStartTime = millis();
+      // ▲▲▲ ここまで変更 ▲▲▲
+    }
+  }
+  if (isButtonPressed(pumpStopSwitch)) {
+    if (pumpState == STATE_RUNNING) {
+      // pumpState = STATE_STOPPED;
+      DEBUG_PRINTLN("Pump Stop Switch ON");
+      stopPump(); // ★stopPump関数を呼び出すだけにする
+    }
+  }
+}
+
+// ポンプの状態更新
+void updateSystemState() {
+  rpm_value = getTargetRpm();
+
+  if (pumpState == STATE_RUNNING) {
+    digitalWrite(P_LAMP_PIN, HIGH);
+    digitalWrite(LED_PUMP_RUN_PIN, HIGH);
+    digitalWrite(LED_PUMP_STOP_PIN, LOW);
+    unsigned long elapsedTimeSec = (millis() - pumpStartTime) / 1000;
+    if (elapsedTimeSec > PUMP_TIMEOUT_SEC && lastCurrentPeak > PUMP_CURRENT_THRESHOLD) {
+      // pumpState = STATE_STOPPED;
+      DEBUG_PRINTLN("Pump stopped automatically due to low current.");
+      stopPump(); // ★stopPump関数を呼び出すように変更
+    }
+  } else {
+    digitalWrite(P_LAMP_PIN, LOW);
+    digitalWrite(LED_PUMP_RUN_PIN, LOW);
+    digitalWrite(LED_PUMP_STOP_PIN, HIGH);
+  }
+}
+
+// 3桁表示のため、1000以上は999として表示
+void updateDisplays() {
+  // ▼▼▼ 【変更点】tm1に回転数(rpm_value)の代わりに、しきい値(PUMP_CURRENT_THRESHOLD)を表示 ▼▼▼
+  tm2.displayNum(PUMP_CURRENT_THRESHOLD);
+
+  tm1.displayNum(rpm_value);
+  if (pumpState == STATE_RUNNING) {
+    tm3.displayNum(lastCurrentPeak);
+    // tm3.displayNum((millis() - pumpStartTime) / 1000);
+  } else {
+    // tm2.displayNum(0);
+    // tm3.displayNum(0);
+  }
+}
+
+// シリアルからのコマンド受信可否によるLED点灯消灯
+void handleSerialCommunication() {
+#if 1
+  // インバーターからの応答を受信・解析する
+  while (Serial.available() > 0) {
+    digitalWrite(LED_SERIAL_RX_PIN, HIGH); // 受信中にLED点灯
+
+    byte incomingByte = Serial.read();
+
+    // バッファにデータを格納
+    if (responseByteCount < INVERTER_RESPONSE_SIZE) {
+      inverterResponseBuffer[responseByteCount] = incomingByte;
+      responseByteCount++;
+    }
+
+    // 規定のバイト数を受信したら、パケットを処理
+    if (responseByteCount >= INVERTER_RESPONSE_SIZE) {
+      // パケットのヘッダを確認 (宛先:自分, 送信元:ｲﾝﾊﾞｰﾀ, ｺﾏﾝﾄﾞ:運転)
+      if (inverterResponseBuffer[0] == 0x01 && inverterResponseBuffer[1] == 0x00 && inverterResponseBuffer[2] == 0x10) {
+        
+        // エラーコードを抽出（仕様書より8バイト目、配列インデックスは7）
+        byte errorCode = inverterResponseBuffer[7];
+
+        // エラーコードが0x00以外で、かつ現在ポンプが運転中の場合
+        if (errorCode != 0x00 && pumpState == STATE_RUNNING) {
+          // 要件①：コマンドを送らずに、プログラムの状態を停止に移行する
+          pumpState = STATE_STOPPED;
+          digitalWrite(EM_LAMP_PIN, HIGH); // 非常停止ランプ点灯 2025年9月17日
+          DEBUG_PRINT("Inverter Error Detected! Code: 0x");
+          if (errorCode < 0x10) DEBUG_PRINT("0"); // 見やすいようにゼロ埋め
+          DEBUG_PRINTLN(errorCode, HEX);
+          DEBUG_PRINTLN("Transitioning to STOPPED mode without sending command.");
+        }
+      }
+      
+      responseByteCount = 0; // 次のパケットのためにカウンタをリセット
+    }
+  }
+  digitalWrite(LED_SERIAL_RX_PIN, LOW); // 受信処理後にLED消灯
+#else
+  if (Serial.available() > 0) {
+    digitalWrite(LED_SERIAL_RX_PIN, HIGH);
+    DEBUG_PRINT("Received: ");
+    while (Serial.available() > 0) {
+      int val = Serial.read();
+      if (val < 0x10) {
+        DEBUG_PRINT("0"); // 見やすいように0を補完
+      }
+      DEBUG_PRINT(val, HEX);
+      DEBUG_PRINT(" ");
+      delay(2);
+    }
+    DEBUG_PRINTLN(""); // 最後に改行
+    digitalWrite(LED_SERIAL_RX_PIN, LOW);
+  }
+#endif
+}
+
+// タイマー処理でトリガーされる定期処理（コマンド送信、ピーク電流測定）
+void handlePeriodicTasks() {
+  if (!processFlag) return;
+  processFlag = false;
+
+  measurePeakCurrent();
+
+  static int commandTimerCount = 0;
+  commandTimerCount++;
+  if (commandTimerCount >= (COMMAND_INTERVAL_MS / TIMER_INTERVAL_MS)) {
+    commandTimerCount = 0;
+    if (pumpState == STATE_RUNNING) {
+        double analog_value_f = (rpm_value + 5.092) / 17.945;
+        if (analog_value_f > 139.6) analog_value_f = 139.6;
+        if (analog_value_f < 34.0) analog_value_f = 34.0;
+        byte analog_value = (byte)analog_value_f;
+
+        byte command[8] = {0x00, 0x01, 0x10, 0x02, analog_value, 0x01, 0x00, 0x00};
+        byte sum = 0;
+        for(int i=0; i < 7; i++) { sum += command[i]; }
+        command[7] = 0x55 - sum;
+        Serial.write(command, 8);
+    }else{
+        // // ポンプ停止中は回転数0のコマンドを送信する
+        // byte stop_command[8] = {0x00, 0x01, 0x10, 0x02, 0x00, 0x01, 0x00, 0x00};
+        // byte sum = 0;
+        // for(int i=0; i < 7; i++) {
+        //   sum += stop_command[i];
+        // }
+        // stop_command[7] = 0x55 - sum; // チェックサムを計算
+        // Serial.write(stop_command, 8);
+    }
+  }
+}
+
+// --- 設定項目 ---
+// 移動平均で平均化するサンプル数。
+// この値が大きいほどノイズに強くなりますが、実際の電流の変化に対する反応が少し緩やかになります。
+// まずは10で試し、効きが弱い/強すぎる場合は5〜20の範囲で調整してみてください。
+const int MOVING_AVG_SIZE = 10;
+// ポンプのピーク電流を測定
+void measurePeakCurrent() {
+  // --- 移動平均フィルタ用の静的変数 ---
+  static bool is_initialized = false;
+  static int readings[MOVING_AVG_SIZE];
+  static int readIndex = 0;
+  static long total = 0;
+  
+  // --- ピーク検出用の静的変数 ---
+  static int analog_cnt = 0;
+  // ADCの有効範囲の下限値(512)をピークの初期値（兼、最低値）とする
+  static int current_reading_max = 512;
+
+  // --- 初回実行時にフィルタの変数を初期化する処理 ---
+  if (!is_initialized) {
+    for (int i = 0; i < MOVING_AVG_SIZE; i++) {
+      readings[i] = 512; // 想定される最低値で配列を埋める
+    }
+    total = 512L * MOVING_AVG_SIZE; // long型で合計値を計算しておく
+    is_initialized = true;
+  }
+  
+  digitalWrite(LED_ISR_PIN, !digitalRead(LED_ISR_PIN));
+
+  // --- 移動平均フィルタの計算 ---
+  // 1. 合計から一番古い測定値を引く
+  total = total - readings[readIndex];
+  
+  // 2. ADCから新しい値を読み取る
+  int new_reading = analogRead(CURRENT_ANALOG_IN_PIN);
+  
+  // 3. 新しい測定値を配列に格納（古い値は上書きされる）
+  readings[readIndex] = new_reading;
+  
+  // 4. 合計に新しい測定値を足す
+  total = total + readings[readIndex];
+  
+  // 5. 次に上書きする配列の場所を更新
+  readIndex++;
+  if (readIndex >= MOVING_AVG_SIZE) {
+    readIndex = 0;
+  }
+  
+  // 6. 平均値を計算して「平滑化された現在値」とする
+  int smoothed_val = total / MOVING_AVG_SIZE;
+
+  // --- ピーク検出（平滑化された値を使用）---
+  // 平滑化された値が、今までの最大値より大きいかチェック
+  if (smoothed_val > current_reading_max) {
+    // 範囲内の最大値として更新
+    if (smoothed_val <= 1023) {
+      current_reading_max = smoothed_val;
+    }
+  }
+
+  // --- 1.5秒ごとにピーク値を確定 ---
+  analog_cnt++;
+  if (analog_cnt >= (1500 / TIMER_INTERVAL_MS)) {
+    // 確定したピーク値が、初期値(512)より大きい場合のみ有効なピークとする
+    if (current_reading_max > 512) {
+      lastCurrentPeak = current_reading_max;
+      DEBUG_PRINT("Current Peak (Smoothed): ");
+      DEBUG_PRINTLN(lastCurrentPeak);
+    } else {
+      lastCurrentPeak = 0; // または512など、無効を示す値
+      DEBUG_PRINTLN("No valid peak detected.");
+    }
+    
+    // 次の測定期間のためにリセット
+    current_reading_max = 512;
+    analog_cnt = 0;
+  }
+#if 0 // 元の簡易版
+  static int analog_cnt = 0;
+  static int current_reading_max = 512;
+  
+  digitalWrite(LED_ISR_PIN, !digitalRead(LED_ISR_PIN));
+
+  int current_val = analogRead(CURRENT_ANALOG_IN_PIN);
+  if (current_val > current_reading_max) {
+    current_reading_max = current_val;
+  }
+
+  analog_cnt++;
+  if (analog_cnt >= (1500 / TIMER_INTERVAL_MS)) {
+    lastCurrentPeak = current_reading_max;
+    DEBUG_PRINT("Current Peak: ");
+    DEBUG_PRINTLN(lastCurrentPeak);
+    current_reading_max = 512;
+    analog_cnt = 0;
+  }
+#endif
+}
+
+/**
+ * @brief 実行時モードに応じて目標回転数を取得する（サインカーブ・プライミング機能付き）
+ * @details 最高速度でのみ2秒間の保持時間を設けた修正版。
+ */
+int getTargetRpm() {
+  // ポンプが運転中で、かつ起動後プライミング時間内の場合にシーケンスを実行
+  if (pumpState == STATE_RUNNING) {
+    unsigned long elapsedTimeMillis = millis() - pumpStartTime;
+    if (elapsedTimeMillis < (PRIMING_DURATION_SEC * 1000UL)) {
+      // --- ▼▼▼ ここから修正箇所 ▼▼▼ ---
+
+      // 1. 定数を定義
+      const float RAMP_CYCLE_SEC = PRIMING_CYCLE_SEC; // 回転数が上下する時間（4秒）
+      // const float HOLD_DURATION_SEC = 2.0;          // 最高回転数での保持時間（秒）
+      // 1サイクルの合計時間 = 回転の上下時間(4秒) + 最高保持(2秒)
+      const float TOTAL_CYCLE_SEC = RAMP_CYCLE_SEC + HOLD_DURATION_SEC;
+
+      // 2. 現在の経過時間が、1サイクル(6秒)の中でどの位置にあるかを計算
+      unsigned long timeInCycleMillis = elapsedTimeMillis % (unsigned long)(TOTAL_CYCLE_SEC * 1000.0);
+
+      // 3. 保持時間を考慮した「見かけ上の経過時間」を計算する
+      unsigned long rampTimeMillis;
+      // サインカーブが頂点に達する時間 (4秒サイクルの1/4 = 1秒)
+      unsigned long maxRpmHoldStart = (unsigned long)((RAMP_CYCLE_SEC / 4.0) * 1000.0); // 1000ms
+      // 最高回転数での保持が終了する時間
+      unsigned long maxRpmHoldEnd   = maxRpmHoldStart + (unsigned long)(HOLD_DURATION_SEC * 1000.0); // 3000ms
+
+      if (timeInCycleMillis < maxRpmHoldStart) {
+        // 最高回転数に達するまで（サインカーブの0秒 -> 1秒地点）
+        rampTimeMillis = timeInCycleMillis;
+      } else if (timeInCycleMillis < maxRpmHoldEnd) {
+        // 最高回転数で保持（サインカーブの1秒地点で時間を止める）
+        rampTimeMillis = maxRpmHoldStart;
+      } else {
+        // 最低回転数に向かって下降し、再び上昇する（サインカーブの1秒 -> 4秒地点）
+        // 止まっていた時間(2秒)を考慮して、サインカーブの時間を進める
+        rampTimeMillis = maxRpmHoldStart + (timeInCycleMillis - maxRpmHoldEnd);
+      }
+
+      // 4. 「見かけ上の経過時間」を使って、元のサインカーブ計算を実行
+      float angle = (rampTimeMillis / (RAMP_CYCLE_SEC * 1000.0)) * 2.0 * PI;
+      float sinValue = sin(angle);
+
+      // 5. -1.0〜1.0の値を、最小RPM〜最大RPMの範囲に変換(マッピング)
+      float rpm_range = PRIMING_MAX_RPM - PRIMING_MIN_RPM;
+      float rpm_midpoint = (PRIMING_MAX_RPM + PRIMING_MIN_RPM) / 2.0;
+      int targetRpm = (int)(rpm_midpoint + (sinValue * rpm_range / 2.0));
+      
+      return targetRpm;
+      // --- ▲▲▲ ここまで修正箇所 ▲▲▲ ---
+    }
+  }
+
+  // プライミング時間終了後、またはポンプ停止時は通常の回転数制御に戻る
+  if (rpmControlMode == MODE_VOLUME) {
+    return calculateRpmFromVolume(); // ボリュームから計算
+  } else { // MODE_FIXED
+    return NORMAL_MAX_RPM; // 設定された固定値を返す
+  }
+}
+
+// ▼▼▼ ここから追加 ▼▼▼
+/**
+ * @brief 配列を小さい順に並べ替える（バブルソート）
+ * @param arr 並べ替える配列
+ * @param n 配列の要素数
+ */
+void simpleSort(int arr[], int n) {
+  for (int i = 0; i < n - 1; i++) {
+    for (int j = 0; j < n - i - 1; j++) {
+      if (arr[j] > arr[j + 1]) {
+        // 隣の要素と比較して大きければ入れ替える
+        int temp = arr[j];
+        arr[j] = arr[j + 1];
+        arr[j + 1] = temp;
+      }
+    }
+  }
+}
+// ▲▲▲ ここまで追加 ▲▲▲
+
+// 可変抵抗から回転数を計算
+int calculateRpmFromVolume() {
+    const int sampleCount = 5;
+    int readings[sampleCount];
+
+    // 指定回数、値を読み取って配列に格納
+    for (int i = 0; i < sampleCount; i++) {
+        readings[i] = analogRead(RPM_ANALOG_IN_PIN);
+        delay(2);
+    }
+
+    // 配列を小さい順に並べ替える
+    simpleSort(readings, sampleCount);
+    // 並べ替えた後の中央の値を取得
+    int median = readings[sampleCount / 2];
+    // 取得した中央値を使って計算
+    double analog_value = median * 0.1032 + 34.0;
+    
+    // --- ▼▼▼ ここから修正箇所 ▼▼▼ ---
+    // 先ほど設定した NORMAL_MAX_RPM から、コマンドで送る上限値を計算する
+    double max_analog_value = (NORMAL_MAX_RPM + 5.092) / 17.945;
+
+    // 計算した上限値で analog_value をクリッピング（頭打ち）する
+    if (analog_value > max_analog_value) analog_value = max_analog_value;
+    // --- ▲▲▲ ここまで修正箇所 ▲▲▲ ---
+
+    if (analog_value < 34.0) analog_value = 34.0;
+    return (int)(analog_value * 17.945 - 5.092);
+}
+void timerInterrupt() {
+  // 一定間隔で行うインバーターへのコマンド送信やピーク電流測定のためのフラグをセット
+  processFlag = true;
+}
+
+// 文字列の前後の空白を削除
+void trim(char* str) {
+  if (str == nullptr) return;
+  char* start = str;
+  while (isspace(*start)) {
+    start++;
+  }
+  char* end = start + strlen(start) - 1;
+  while (end > start && isspace(*end)) {
+    end--;
+  }
+  *(end + 1) = '\0';
+  if (start != str) {
+    memmove(str, start, end - start + 2);
+  }
+}
