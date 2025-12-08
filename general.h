@@ -37,3 +37,6 @@ extern const int EM_LAMP_PIN;
 extern const int P_LAMP_PIN;
 extern const int LED_PUMP_RUN_PIN;
 extern const int LED_PUMP_STOP_PIN;
+struct Switch;   // ← 型が後で出てくることを宣言だけする
+extern Switch uvStopSwitch;
+extern Switch pumpStopSwitch;

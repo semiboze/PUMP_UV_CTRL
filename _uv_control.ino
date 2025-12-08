@@ -116,7 +116,7 @@ void checkUvLampConnection() {
 
   for(int i = 0; i < numActiveUvLamps; i++) {
     if (uvLampState == STATE_RUNNING) {
-      if (digitalRead(uvInPins[i]) == HIGH) {
+      if (digitalRead(uvInPins[i]) == LOW) { // 2025-11-21 PULLUPに変更したので異常でLOWになる
         // 信号が正常な場合は常時点灯
         digitalWrite(uvOutPins[i], HIGH);
       } else {
@@ -176,15 +176,15 @@ void updateUvSystemState() {
   if (uvLampState == STATE_RUNNING) {
     digitalWrite(UV_LAMP_PIN, HIGH);
     // digitalWrite(T_CNT_PIN, HIGH);
-    digitalWrite(UV_GROUP_A_PIN, HIGH);
-    digitalWrite(UV_GROUP_B_PIN, HIGH);
+    digitalWrite(UV_GROUP_A_PIN, LOW);// リレーはLOWアクティブだった2025-11-21
+    digitalWrite(UV_GROUP_B_PIN, LOW);
     digitalWrite(LED_UV_RUN_PIN, HIGH);
     digitalWrite(LED_UV_STOP_PIN, LOW);
   } else {
     digitalWrite(UV_LAMP_PIN, LOW);
     // digitalWrite(T_CNT_PIN, LOW);
-    digitalWrite(UV_GROUP_A_PIN, LOW);
-    digitalWrite(UV_GROUP_B_PIN, LOW);
+    digitalWrite(UV_GROUP_A_PIN, HIGH);
+    digitalWrite(UV_GROUP_B_PIN, HIGH);
     digitalWrite(LED_UV_RUN_PIN, LOW);
     digitalWrite(LED_UV_STOP_PIN, HIGH);
   }
@@ -208,7 +208,7 @@ void uv_setup(int detected_lamp_count) {
   
   // ピンモード設定のループを、固定値ではなく検出したランプ数で行う
   for(int i = 0; i < numActiveUvLamps; i++) {
-    pinMode(uvInPins[i], INPUT);
+    pinMode(uvInPins[i], INPUT_PULLUP);// 2025-11-21 PULLUPに変更
     pinMode(uvOutPins[i], OUTPUT);
   } 
 

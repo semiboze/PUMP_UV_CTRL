@@ -48,6 +48,7 @@ const int MANUAL_THRESHOLD_MODE_PIN = 43;  // アナログダイヤルで閾値�
 // ----------------------------------------------------------------
 // ピン定義
 // ----------------------------------------------------------------
+const int BOTH_STOP_OUT_PIN = 10;  // ★追加★★ 両方停止出力ピン カウンターリセット機能
 const int PIN_CLK1          = 12, PIN_DIO1              = 13; 
 const int PIN_CLK2          = 14, PIN_DIO2              = 15; 
 const int PIN_CLK3          = 16, PIN_DIO3              = 17;
@@ -145,6 +146,9 @@ void setup() {
   pinMode(UV_DETECT_BIT3_PIN, INPUT_PULLUP);
   delay(5); // プルアップが安定するのを待つ
 
+  pinMode(BOTH_STOP_OUT_PIN, OUTPUT);   // ★追加★★ 両方停止出力ピン 初期化
+  digitalWrite(BOTH_STOP_OUT_PIN, LOW); // ★追加★★ 初期状態はLOW
+
   // 4つのピンの状態を読み取り、2進数としてランプ数を計算
   detectedLamps = 0; // いったん0に初期化
   if (digitalRead(UV_DETECT_BIT0_PIN) == LOW) { detectedLamps += 1; } // 1の位
@@ -211,6 +215,7 @@ void loop() {
   handleSerialCommunication();  // シリアルからのコマンド受信可否によるLED点灯消灯
   handlePeriodicTasks();        // タイマー処理でトリガーされる定期処理（コマンド送信、ピーク電流測定）
 
+  both_stop_check_task();       // ★追加★★ 両方停止出力ピンの制御タスク
 }
 
 // ================================================================
@@ -709,4 +714,16 @@ void trim(char* str) {
   if (start != str) {
     memmove(str, start, end - start + 2);
   }
+}
+// ★追加★★ 両方停止出力ピンの制御タスク
+void both_stop_check_task() {
+    // 安定状態をチェック
+    bool pumpStop = (pumpStopSwitch.stableState == LOW);
+    bool uvStop   = (uvStopSwitch.stableState == LOW);
+
+    if (pumpStop && uvStop) {
+        digitalWrite(BOTH_STOP_OUT_PIN, HIGH);
+    } else {
+        digitalWrite(BOTH_STOP_OUT_PIN, LOW);
+    }
 }
