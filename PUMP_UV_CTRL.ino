@@ -75,7 +75,9 @@ SystemState pumpState = STATE_STOPPED;
 const int SERIAL_BAUD_RATE    = 2400;
 const int TIMER_INTERVAL_MS   = 50;           // タイマー割り込み間隔 (ms)
 const int DEBOUNCE_DELAY_MS   = 50;           // スイッチのチャタリング防止時間 (ms)
-const unsigned long PUMP_TIMEOUT_SEC  = 60;   // 起動後ポンプ電流判断までの待機時間 (秒)
+const unsigned long PUMP_TIMEOUT_SEC  = 60;   // 既存の過電流チェック用の時間（既存仕様を維持）
+// ★追加★ ポンプ起動時の「低電流チェック」の猶予時間
+const unsigned long PUMP_STARTUP_TIMEOUT_SEC  = 120;  // 起動後電流が閾値に到達するまでの監視タイマー秒 2025-12-09
 const int PUMP_CURRENT_THRESHOLD_DEFAULT = 512; // デフォルトのポンプ電流しきい値
 int PUMP_CURRENT_THRESHOLD      = PUMP_CURRENT_THRESHOLD_DEFAULT;  // ポンプ運転を判断する電流のしきい値
 const int COMMAND_INTERVAL_MS = 300;          // コマンド送信間隔 (ms)
@@ -85,14 +87,19 @@ varControlMode rpmControlMode;
 varControlMode currThresholdCntMode; // [変更点] 電流しきい値可変モード
 
 unsigned long pumpStartTime = 0;
+// ★追加★ ポンプ起動時の電流監視用 変数 2025-12-09
+bool pumpStartupOk        = false;   // 一度でもしきい値以上の電流を検出したら true
+bool pumpStartupError     = false;   // 「低電流エラー」で停止したら true
+int  maxCurrentSinceStart = 0;       // 起動開始から今までの最大電流(ADC値)
+
 volatile bool processFlag = false;
 int rpm_value = 0;
 int lastCurrentPeak = 512;
 int detectedLamps = 0;              // 検出したランプ数を格納する変数
 
-TM1637 tm1(PIN_CLK1, PIN_DIO1);
-TM1637 tm2(PIN_CLK2, PIN_DIO2);
-TM1637 tm3(PIN_CLK3, PIN_DIO3);
+TM1637 tm1(PIN_CLK1, PIN_DIO1);     // 回転数表示用
+TM1637 tm2(PIN_CLK2, PIN_DIO2);     // 電流しきい値表示用
+TM1637 tm3(PIN_CLK3, PIN_DIO3);     // 最後の電流ピーク値表示用
 
 // ▼▼▼ ここから追加 ▼▼▼ 2025年9月16日 インバーターからの受信用
 // インバーターからの応答データ受信バッファ
@@ -341,7 +348,13 @@ void handleSwitchInputs() {
       DEBUG_PRINTLN("Sending pre-start stop command to clear inverter state.");
       sendStopCommand();
       delay(50); // コマンド送信の間隔を少し空ける
-      
+    
+      // ★追加★ 起動監視関連をリセット 2025-12-09
+      pumpStartupOk        = false;
+      pumpStartupError     = false;
+      maxCurrentSinceStart = 0;
+      digitalWrite(EM_LAMP_PIN, LOW);  // 以前のエラーで点灯していた非常停止ランプを消灯
+
       pumpState = STATE_RUNNING;
       pumpStartTime = millis();
       // ▲▲▲ ここまで変更 ▲▲▲
@@ -364,18 +377,43 @@ void updateSystemState() {
     digitalWrite(P_LAMP_PIN, HIGH);
     digitalWrite(LED_PUMP_RUN_PIN, HIGH);
     digitalWrite(LED_PUMP_STOP_PIN, LOW);
-    unsigned long elapsedTimeSec = (millis() - pumpStartTime) / 1000;
-    if (elapsedTimeSec > PUMP_TIMEOUT_SEC && lastCurrentPeak > PUMP_CURRENT_THRESHOLD) {
-      // pumpState = STATE_STOPPED;
-      DEBUG_PRINTLN("Pump stopped automatically due to low current.");
-      stopPump(); // ★stopPump関数を呼び出すように変更
+
+    unsigned long elapsedTimeSec = (millis() - pumpStartTime) / 1000UL;
+
+    // ★追加★ 起動後120秒以内にしきい値に達しなかった場合の「低電流エラー」 2025-12-09
+    if (!pumpStartupOk && !pumpStartupError &&
+        elapsedTimeSec >= PUMP_STARTUP_TIMEOUT_SEC) {
+
+      if (maxCurrentSinceStart < PUMP_CURRENT_THRESHOLD) {
+        pumpStartupError = true;
+        DEBUG_PRINT("Pump startup failed: maxCurrentSinceStart=");
+        DEBUG_PRINT(maxCurrentSinceStart);
+        DEBUG_PRINT(" < threshold=");
+        DEBUG_PRINTLN(PUMP_CURRENT_THRESHOLD);
+
+        stopPump();
+        digitalWrite(EM_LAMP_PIN, HIGH); // 非常停止ランプ点灯
+      } else {
+        // 念のため OK が立っていなければここで立てる
+        pumpStartupOk = true;
+      }
     }
+
+    // ★既存仕様★ 過電流保護（ロジック自体はそのまま維持）
+    if (elapsedTimeSec > PUMP_TIMEOUT_SEC &&
+        lastCurrentPeak > PUMP_CURRENT_THRESHOLD) {
+      DEBUG_PRINTLN("Pump stopped automatically due to over current.");
+      stopPump();
+      digitalWrite(EM_LAMP_PIN, HIGH); // 過電流でも非常停止ランプ点灯
+    }
+
   } else {
     digitalWrite(P_LAMP_PIN, LOW);
     digitalWrite(LED_PUMP_RUN_PIN, LOW);
     digitalWrite(LED_PUMP_STOP_PIN, HIGH);
   }
 }
+
 
 // 3桁表示のため、1000以上は999として表示
 void updateDisplays() {
@@ -553,6 +591,18 @@ void measurePeakCurrent() {
       lastCurrentPeak = current_reading_max;
       DEBUG_PRINT("Current Peak (Smoothed): ");
       DEBUG_PRINTLN(lastCurrentPeak);
+
+      // ★追加★ ポンプ起動中の最大電流と「しきい値到達」を記録 2025-12-09
+      if (pumpState == STATE_RUNNING) {
+        if (lastCurrentPeak > maxCurrentSinceStart) {
+          maxCurrentSinceStart = lastCurrentPeak;
+        }
+        if (!pumpStartupOk && lastCurrentPeak >= PUMP_CURRENT_THRESHOLD) {
+          pumpStartupOk = true;
+          DEBUG_PRINTLN("Pump startup current reached threshold.");
+        }
+      }
+
     } else {
       lastCurrentPeak = 0; // または512など、無効を示す値
       DEBUG_PRINTLN("No valid peak detected.");
