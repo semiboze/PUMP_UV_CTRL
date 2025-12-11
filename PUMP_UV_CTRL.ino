@@ -48,8 +48,8 @@ const int MANUAL_THRESHOLD_MODE_PIN = 43;  // アナログダイヤルで閾値�
 // ----------------------------------------------------------------
 // ピン定義
 // ----------------------------------------------------------------
-const int BOTH_STOP_OUT_PIN = 10;  // ★追加★★ 両方停止出力ピン カウンターリセット機能
-const int PIN_CLK1          = 12, PIN_DIO1              = 13; 
+const int HOURMETER_RESET_PIN  = A9; // ★追加★ アワーメーターリセット出力用GPIO（未使用ピン利用）2025年12月11日
+const int PIN_CLK1          = 12, PIN_DIO1              = A8; 
 const int PIN_CLK2          = 14, PIN_DIO2              = 15; 
 const int PIN_CLK3          = 16, PIN_DIO3              = 17;
 const int P_SW_START_PIN    = 2 , P_SW_STOP_PIN         = 3;
@@ -57,7 +57,7 @@ const int P_LAMP_PIN        = 4;
 const int EM_LAMP_PIN = 8;      // 非常停止ランプ (EM_LAMP_PIN) 接続ピン
 const int T_CNT_PIN         = 9; // ★★★ T_CNT_PINの定義をこちらに移動 ★★★
 const int LED_PUMP_RUN_PIN  = 45, LED_PUMP_STOP_PIN     = 46; // 操作盤の稼働灯・停止灯 現在ハード未実装
-const int LED_ISR_PIN       = 49, LED_SERIAL_RX_PIN     = 50;
+const int LED_ISR_PIN       = LED_BUILTIN, LED_SERIAL_RX_PIN     = 50;
 const int RPM_ANALOG_IN_PIN = 0 ;       // 回転数調整ダイヤル可変抵抗 (ポテンショメーター) 接続ピン
 const int CURRENT_ANALOG_IN_PIN = 1;    // ポンプの電流センサー接続ピン
 const int THRESHOLD_ANALOG_IN_PIN = 2;  // [変更点] 電流しきい値調整用のダイヤル可変抵抗を接続するアナログピン
@@ -74,6 +74,7 @@ enum SystemState { STATE_STOPPED, STATE_RUNNING };
 SystemState pumpState = STATE_STOPPED;
 const int SERIAL_BAUD_RATE    = 2400;
 const int TIMER_INTERVAL_MS   = 50;           // タイマー割り込み間隔 (ms)
+const int LED_ISR_BLINK_INTERVAL_SEC = 1;     // 1秒ごとに点滅させる。変えたければここを変える 2025年12月10日
 const int DEBOUNCE_DELAY_MS   = 50;           // スイッチのチャタリング防止時間 (ms)
 const unsigned long PUMP_TIMEOUT_SEC  = 60;   // 既存の過電流チェック用の時間（既存仕様を維持）
 // ★追加★ ポンプ起動時の「低電流チェック」の猶予時間
@@ -108,6 +109,9 @@ byte inverterResponseBuffer[INVERTER_RESPONSE_SIZE];
 int responseByteCount = 0;
 // ▲▲▲ ここまで追加 ▲▲▲
 
+// 追加2025年12月11日 両方停止出力ピン制御用変数
+bool hourMeterResetComboLatched = false;  // STOPボタン同時押しでのリセット済みフラグ
+
 struct Switch {
   const int pin;
   int lastReading, stableState;
@@ -132,7 +136,9 @@ int calculateRpmFromVolume();     // 可変抵抗から回転数を計算
 void trim(char* str);             // 文字列の前後の空白を削除
 void updateCurrentThreshold();    // しきい値を更新する関数のプロトタイプ宣言
 void updateTCntPin();             // ★★★ T_CNT_PINを制御する関数のプロトタイプ宣言 ★★★
-void runStartupLedSequence(int);     // 起動時のLEDシーケンス
+void runStartupLedSequence(int);  // 起動時のLEDシーケンス
+void resetUvHourMeter();          // ★追加★ UVアワーメーターリセット関数プロトタイプ 2025年12月11日
+void both_stop_check_task();      // ★追加★★ 両方停止出力ピンの制御タスクプロトタイプ 2025年12月11日
 
 // ----------------------------------------------------------------
 // setup() - 初期化処理
@@ -153,8 +159,8 @@ void setup() {
   pinMode(UV_DETECT_BIT3_PIN, INPUT_PULLUP);
   delay(5); // プルアップが安定するのを待つ
 
-  pinMode(BOTH_STOP_OUT_PIN, OUTPUT);   // ★追加★★ 両方停止出力ピン 初期化
-  digitalWrite(BOTH_STOP_OUT_PIN, LOW); // ★追加★★ 初期状態はLOW
+  pinMode(HOURMETER_RESET_PIN, OUTPUT);   // ★追加★★ 両方停止出力ピン 初期化
+  digitalWrite(HOURMETER_RESET_PIN, LOW); // ★追加★★ 初期状態はLOW
 
   // 4つのピンの状態を読み取り、2進数としてランプ数を計算
   detectedLamps = 0; // いったん0に初期化
@@ -267,12 +273,16 @@ void initializePins() {
   pinMode(LED_PUMP_RUN_PIN, OUTPUT);
   pinMode(LED_PUMP_STOP_PIN, OUTPUT);
   pinMode(LED_ISR_PIN, OUTPUT);
+  
   pinMode(LED_SERIAL_RX_PIN, OUTPUT);
   pinMode(T_CNT_PIN, OUTPUT); // ★★★ T_CNT_PINの初期化をこちらに移動 ★★★
   delay(5);
   digitalWrite(T_CNT_PIN, LOW);// ★★★ 初期状態はLOW ★★★
 
   digitalWrite(LED_PUMP_STOP_PIN, HIGH);
+  // ★追加★ アワーメーターリセット出力ピン の初期化 2025年12月11日
+  pinMode(HOURMETER_RESET_PIN, OUTPUT);
+  digitalWrite(HOURMETER_RESET_PIN, LOW); // 通常時は非リセット状態（アクティブHIGH前提）
 }
 
 // TM1637ディスプレイの初期化
@@ -337,7 +347,9 @@ void stopPump() {
 }
 
 // スイッチ検出処理
+// スイッチ検出処理
 void handleSwitchInputs() {
+  // ポンプスタートボタン
   if (isButtonPressed(pumpStartSwitch)) {
     if (pumpState == STATE_STOPPED) {
       // pumpState = STATE_RUNNING;
@@ -360,6 +372,8 @@ void handleSwitchInputs() {
       // ▲▲▲ ここまで変更 ▲▲▲
     }
   }
+
+  // ポンプストップボタン
   if (isButtonPressed(pumpStopSwitch)) {
     if (pumpState == STATE_RUNNING) {
       // pumpState = STATE_STOPPED;
@@ -535,7 +549,9 @@ void measurePeakCurrent() {
   static int readings[MOVING_AVG_SIZE];
   static int readIndex = 0;
   static long total = 0;
-  
+  // ★追加★ LED点滅用カウンタ（タイマータスク呼び出し回数） 2025年12月10日
+  static int ledBlinkCnt = 0;
+
   // --- ピーク検出用の静的変数 ---
   static int analog_cnt = 0;
   // ADCの有効範囲の下限値(512)をピークの初期値（兼、最低値）とする
@@ -550,8 +566,14 @@ void measurePeakCurrent() {
     is_initialized = true;
   }
   
-  digitalWrite(LED_ISR_PIN, !digitalRead(LED_ISR_PIN));
-
+  // ★ここで一定時間ごとにだけLEDをトグル★ 2025年12月10日
+  // TIMER_INTERVAL_MSごとにこの関数が呼ばれる想定なので、
+  // 「(秒数 * 1000) / TIMER_INTERVAL_MS」回呼ばれたら1回トグルする。
+  ledBlinkCnt++;
+  if (ledBlinkCnt >= (LED_ISR_BLINK_INTERVAL_SEC * 1000 / TIMER_INTERVAL_MS)) {
+    ledBlinkCnt = 0;
+    digitalWrite(LED_ISR_PIN, !digitalRead(LED_ISR_PIN));
+  }
   // --- 移動平均フィルタの計算 ---
   // 1. 合計から一番古い測定値を引く
   total = total - readings[readIndex];
@@ -767,13 +789,30 @@ void trim(char* str) {
 }
 // ★追加★★ 両方停止出力ピンの制御タスク
 void both_stop_check_task() {
-    // 安定状態をチェック
+    // チャタリング処理後の安定状態
     bool pumpStop = (pumpStopSwitch.stableState == LOW);
-    bool uvStop   = (uvStopSwitch.stableState == LOW);
+    bool uvStop   = (uvStopSwitch.stableState   == LOW);
 
     if (pumpStop && uvStop) {
-        digitalWrite(BOTH_STOP_OUT_PIN, HIGH);
+        // 両STOP同時押し検出
+        if (!hourMeterResetComboLatched) {
+            hourMeterResetComboLatched = true;
+            DEBUG_PRINTLN("Hour meter reset by P_SW_STOP + UV_SW_STOP combo.");
+            resetUvHourMeter();
+        }
     } else {
-        digitalWrite(BOTH_STOP_OUT_PIN, LOW);
+        // どちらかでも離されたら、次の同時押しに備えてラッチ解除
+        hourMeterResetComboLatched = false;
     }
+}
+// -------------------------------------------------------------
+// アワーメーターリセット
+// HOURMETER_RESET_PIN を一定時間アクティブにしてリセットをかける
+// -------------------------------------------------------------
+void resetUvHourMeter() {
+  DEBUG_PRINTLN("resetUvHourMeter: pulse LOW on HOURMETER_RESET_PIN");
+
+  digitalWrite(HOURMETER_RESET_PIN, HIGH);
+  delay(500);  // リセットパルス幅（仕様に合わせて調整：100〜500msくらいでOKなことが多い）
+  digitalWrite(HOURMETER_RESET_PIN, LOW);
 }

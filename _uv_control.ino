@@ -143,33 +143,45 @@ void checkUvLampConnection() {
   }
 #endif
 
-  // --- 共通のデバッグ出力 ---
+  // --- 共通のデバッグ出力 --- 2025年12月10日
   static unsigned long lastDebugPrintTime = 0;
-  if(millis() - lastDebugPrintTime > 10000){
-    lastDebugPrintTime = millis();
-    DEBUG_PRINT("UV Lamps Status ");
-    for(int i = 0; i < numActiveUvLamps; i++) {
-      DEBUG_PRINT(i+1);DEBUG_PRINT(" : ");DEBUG_PRINT(digitalRead(uvInPins[i]));DEBUG_PRINT(", ");
-    }
-    DEBUG_PRINTLN("");
+if (millis() - lastDebugPrintTime > 10000) {
+  lastDebugPrintTime = millis();
+  DEBUG_PRINT("UV Lamps Status ");
+  for (int i = 0; i < numActiveUvLamps; i++) {
+    int val = digitalRead(uvInPins[i]);
+
+    // 1(HIGH) → "NONE", 0(LOW) → "NORMAL"
+    const char* status = (val == HIGH) ? "NONE" : "NORMAL";
+
+    DEBUG_PRINT(i + 1);    DEBUG_PRINT(":");    DEBUG_PRINT(status);    DEBUG_PRINT(", ");
   }
+  DEBUG_PRINTLN("");
+}
+
 }
 
 // UVランプのスイッチ入力処理
 void handleUvSwitchInputs() {
   if (isButtonPressed(uvStartSwitch)) {
     if (uvLampState == STATE_STOPPED) {
+      // ★追加★ ポンプの起動電流がしきい値に達するまではUVを起動させない 2025-12-09
+      if (!pumpStartupOk) {
+        DEBUG_PRINTLN("UV Start ignored: pump startup current not yet reached threshold.");
+      } else {
         uvLampState = STATE_RUNNING;
         DEBUG_PRINTLN("UV Start Switch ON");
+      }
     }
   }
   if (isButtonPressed(uvStopSwitch)) {
     if (uvLampState == STATE_RUNNING) {
-        uvLampState = STATE_STOPPED;
-        DEBUG_PRINTLN("UV Stop Switch ON");
+      uvLampState = STATE_STOPPED;
+      DEBUG_PRINTLN("UV Stop Switch ON");
     }
   }
 }
+
 
 // UVランプの状態更新処理
 void updateUvSystemState() {
