@@ -45,3 +45,11 @@ extern bool pumpStartupError;
 struct Switch;   // ← 型が後で出てくることを宣言だけする
 extern Switch uvStopSwitch;
 extern Switch pumpStopSwitch;
+
+//====================================================
+// [追加] リレーがLOWアクティブの場合の定義
+//  - RELAY_ON  = LOW  （コイルON）
+//  - RELAY_OFF = HIGH （コイルOFF）
+//====================================================
+static const uint8_t RELAY_ON  = LOW;
+static const uint8_t RELAY_OFF = HIGH;

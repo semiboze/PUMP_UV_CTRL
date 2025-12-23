@@ -187,15 +187,15 @@ void updateUvSystemState() {
   if (uvLampState == STATE_RUNNING) {
     digitalWrite(UV_LAMP_PIN, HIGH);
     // digitalWrite(T_CNT_PIN, HIGH);
-    digitalWrite(UV_GROUP_A_PIN, RELAY_ON);// リレーはLOWアクティブだった2025-11-21
-    digitalWrite(UV_GROUP_B_PIN, RELAY_OFF);
+    digitalWrite(UV_GROUP_A_PIN, LOW);// リレーはLOWアクティブだった2025-11-21
+    digitalWrite(UV_GROUP_B_PIN, LOW);
     digitalWrite(LED_UV_RUN_PIN, HIGH);
     digitalWrite(LED_UV_STOP_PIN, LOW);
   } else {
     digitalWrite(UV_LAMP_PIN, LOW);
     // digitalWrite(T_CNT_PIN, LOW);
-    digitalWrite(UV_GROUP_A_PIN, RELAY_OFF);
-    digitalWrite(UV_GROUP_B_PIN, RELAY_OFF);
+    digitalWrite(UV_GROUP_A_PIN, HIGH);
+    digitalWrite(UV_GROUP_B_PIN, HIGH);
     digitalWrite(LED_UV_RUN_PIN, LOW);
     digitalWrite(LED_UV_STOP_PIN, HIGH);
   }
@@ -233,10 +233,6 @@ void uv_setup(int detected_lamp_count) {
   // } 
   pinMode(UV_GROUP_A_PIN, OUTPUT);
   pinMode(UV_GROUP_B_PIN, OUTPUT);
-  // --- UVグループは必ずOFFで立ち上げる（グリッチ防止）---
-  // 先に出力ラッチをOFF側へ（INPUT状態でもpull-up的に働くことがある）
-  digitalWrite(UV_GROUP_A_PIN, RELAY_OFF);
-  digitalWrite(UV_GROUP_B_PIN, RELAY_OFF);
   pinMode(LED_UV_RUN_PIN, OUTPUT);
   pinMode(LED_UV_STOP_PIN, OUTPUT);
   digitalWrite(LED_UV_STOP_PIN, HIGH);

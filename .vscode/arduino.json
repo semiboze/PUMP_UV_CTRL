@@ -1,6 +1,6 @@
 {
     "configuration": "cpu=atmega2560",
     "board": "arduino:avr:mega",
-    "port": "COM9",
+    "port": "COM5",
     "sketch": "PUMP_UV_CTRL.ino"
 }
