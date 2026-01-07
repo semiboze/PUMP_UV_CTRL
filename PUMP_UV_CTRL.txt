@@ -19,7 +19,13 @@
  * [注意]ピン42, 43, A3～A7はプルアップ抵抗内蔵のINPUT_PULLUPモードで使用してください。
  */
 #define DEBUG_MODE          // デバッグ用シリアル出力を有効にする場合はコメントアウトを外す
-const char* FirmwareVersion = "20250916_R1";
+// #define UV_DEBUG_MODE       // UV装置制御関連のデバッグ
+#define PU_DEBUG_MODE       // ポンプ制御関連のデバッグ
+//====================================================
+// [追加] RPM送信ごとのログを出すか（流れるので通常は0推奨）
+//====================================================
+#define DEBUG_RPM_EACH_SEND 0
+const char* FirmwareVersion = "20251225_R1";
 // ----------------------------------------------------------------
 // ▼▼▼ 動作設定 ▼▼▼
 // ----------------------------------------------------------------
@@ -56,14 +62,14 @@ const int P_SW_START_PIN    = 2 , P_SW_STOP_PIN         = 3;
 const int P_LAMP_PIN        = 4;
 const int EM_LAMP_PIN = 8;      // 非常停止ランプ (EM_LAMP_PIN) 接続ピン
 const int T_CNT_PIN         = 9;        // ★★★ T_CNT_PINの定義をこちらに移動 ★★★
-#define FAN_CTRL_PIN  49                // 冷却ファン制御ピン (未使用ピン利用)
+const int FAN_CTRL_PIN = 48;                // 冷却ファン制御ピン
 const int LED_PUMP_RUN_PIN  = 45, LED_PUMP_STOP_PIN     = 46; // 操作盤の稼働灯・停止灯 現在ハード未実装
 const int LED_ISR_PIN       = LED_BUILTIN, LED_SERIAL_RX_PIN     = 50;
-const int RPM_ANALOG_IN_PIN = 0 ;       // 回転数調整ダイヤル可変抵抗 (ポテンショメーター) 接続ピン
-const int CURRENT_ANALOG_IN_PIN = 1;    // ポンプの電流センサー接続ピン
-const int THRESHOLD_ANALOG_IN_PIN = 2;  // [変更点] 電流しきい値調整用のダイヤル可変抵抗を接続するアナログピン
+const int RPM_ANALOG_IN_PIN = A0 ;       // 回転数調整ダイヤル可変抵抗 (ポテンショメーター) 接続ピン
+const int CURRENT_ANALOG_IN_PIN = A1;    // ポンプの電流センサー接続ピン
+const int THRESHOLD_ANALOG_IN_PIN = A2;  // [変更点] 電流しきい値調整用のダイヤル可変抵抗を接続するアナログピン
 
-// UVランプ装着数自動検知用のピン定義（4ビットバイナリ）
+// UVランプ装着数自動検知用のピン定義（4ビットバイナリ）ただし10本まで対応
 const int UV_DETECT_BIT0_PIN = A3; // 1加算 (2^0)
 const int UV_DETECT_BIT1_PIN = A4; // 2加算 (2^1)
 const int UV_DETECT_BIT2_PIN = A5; // 4加算 (2^2)
@@ -73,7 +79,7 @@ const int UV_DETECT_BIT3_PIN = A6; // 8加算 (2^3)
 // ----------------------------------------------------------------
 enum SystemState { STATE_STOPPED, STATE_RUNNING };
 SystemState pumpState = STATE_STOPPED;
-const int SERIAL_BAUD_RATE    = 2400;
+const int SERIAL0_BAUD_RATE    = 115200;
 const int TIMER_INTERVAL_MS   = 50;           // タイマー割り込み間隔 (ms)
 const int LED_ISR_BLINK_INTERVAL_SEC = 1;     // 1秒ごとに点滅させる。変えたければここを変える 2025年12月10日
 const int DEBOUNCE_DELAY_MS   = 50;           // スイッチのチャタリング防止時間 (ms)
@@ -146,16 +152,37 @@ void both_stop_check_task();      // ★追加★★ 両方停止出力ピンの
 // Serial1 : ポンプ通信用（Mega: TX1=D18, RX1=D19）
 //====================================================
 #define PUMP_SERIAL   Serial1
+//====================================================
+// [ファン制御] ここだけ見ればON/OFFが分かるようにする
+// もし「LOWで回る」なら FAN_ACTIVE_LOW を 1 にする
+//====================================================
+// 1: LOWでON（アクティブLOW） / 0: HIGHでON（アクティブHIGH）
+#define FAN_ACTIVE_LOW  0
+#if FAN_ACTIVE_LOW
+  const uint8_t FAN_ON_LEVEL  = LOW;
+  const uint8_t FAN_OFF_LEVEL = HIGH;
+#else
+  const uint8_t FAN_ON_LEVEL  = HIGH;
+  const uint8_t FAN_OFF_LEVEL = LOW;
+#endif
+
+inline void fan_on()  { digitalWrite(FAN_CTRL_PIN, FAN_ON_LEVEL);  }
+inline void fan_off() { digitalWrite(FAN_CTRL_PIN, FAN_OFF_LEVEL); }
 
 // ----------------------------------------------------------------
 // setup() - 初期化処理
 // ----------------------------------------------------------------
 void setup() {
-  Serial.begin(SERIAL_BAUD_RATE);
+  Serial.begin(SERIAL0_BAUD_RATE);
   //--- ポンプ通信用（インバーター） ---
-  PUMP_SERIAL.begin(9600);       // ← いまインバーターに合わせている速度にする
-                                 //    ※現状 Serial.begin(9600) 等で動いてた速度を移植
+  PUMP_SERIAL.begin(2400);       // ← いまインバーターに合わせている速度にする
   DEBUG_PRINTLN("--- System Start ---");
+  // ★追加★ 確認コマンドを最低1回送る（仕様書要求）:contentReference[oaicite:11]{index=11}
+  // ここでは3回だけ軽くリトライ（応答処理は後述の受信側でconfirmedにする）
+  for (int i = 0; i < 3; i++) {
+    sendConfirmCommand();
+    delay(120);  // 応答時間0～100msの記載があるので少し待つ:contentReference[oaicite:12]{index=12}
+  }
 
   // [変更点] 起動時にハードウェア設定を読み込み、RPM制御モードを決定
   pinMode(MANUAL_RPM_MODE_PIN, INPUT_PULLUP);
@@ -173,19 +200,22 @@ void setup() {
   digitalWrite(HOURMETER_RESET_PIN, LOW); // ★追加★★ 初期状態はLOW
 
   // 4つのピンの状態を読み取り、2進数としてランプ数を計算
-  detectedLamps = 0; // いったん0に初期化
+  detectedLamps = 0; // 0に初期化
   if (digitalRead(UV_DETECT_BIT0_PIN) == LOW) { detectedLamps += 1; } // 1の位
   if (digitalRead(UV_DETECT_BIT1_PIN) == LOW) { detectedLamps += 2; } // 2の位
   if (digitalRead(UV_DETECT_BIT2_PIN) == LOW) { detectedLamps += 4; } // 4の位
   if (digitalRead(UV_DETECT_BIT3_PIN) == LOW) { detectedLamps += 8; } // 8の位
-
-  DEBUG_PRINT("UV Lamp Bits (8,4,2,1): ");
-  DEBUG_PRINT(digitalRead(UV_DETECT_BIT3_PIN) == LOW ? "1" : "0");
-  DEBUG_PRINT(digitalRead(UV_DETECT_BIT2_PIN) == LOW ? "1" : "0");
-  DEBUG_PRINT(digitalRead(UV_DETECT_BIT1_PIN) == LOW ? "1" : "0");
-  DEBUG_PRINT(digitalRead(UV_DETECT_BIT0_PIN) == LOW ? "1" : "0");
-  DEBUG_PRINT(" -> Detected Lamps: ");
-  DEBUG_PRINTLN(detectedLamps);
+  if (detectedLamps > MAX_UV_LAMPS) {
+    UV_DEBUG_PRINTLN("Warning: Detected UV lamp count exceeds 10. Limiting to 10.");
+    detectedLamps = MAX_UV_LAMPS; // 安全のため最大10本に制限
+  } 
+  UV_DEBUG_PRINT("UV Lamp Bits (8,4,2,1): ");
+  UV_DEBUG_PRINT(digitalRead(UV_DETECT_BIT3_PIN) == LOW ? "1" : "0");
+  UV_DEBUG_PRINT(digitalRead(UV_DETECT_BIT2_PIN) == LOW ? "1" : "0");
+  UV_DEBUG_PRINT(digitalRead(UV_DETECT_BIT1_PIN) == LOW ? "1" : "0");
+  UV_DEBUG_PRINT(digitalRead(UV_DETECT_BIT0_PIN) == LOW ? "1" : "0");
+  UV_DEBUG_PRINT(" -> Detected Lamps: ");
+  UV_DEBUG_PRINTLN(detectedLamps);
 
   if (digitalRead(MANUAL_RPM_MODE_PIN) == LOW) {
     rpmControlMode = MODE_VOLUME;
@@ -195,22 +225,22 @@ void setup() {
   pinMode(MANUAL_THRESHOLD_MODE_PIN, INPUT_PULLUP); // [変更点] しきい値調整フラグ用ピンの初期化
   delay(5); // プルアップが安定するのを待つ
   if(digitalRead(MANUAL_THRESHOLD_MODE_PIN) == LOW) {
-    DEBUG_PRINTLN("Current Threshold Adjustment: ENABLED");
+    PU_DEBUG_PRINTLN("Current Threshold Adjustment: ENABLED");
     currThresholdCntMode = MODE_VOLUME;
   } else {
-    DEBUG_PRINTLN("Current Threshold Adjustment: DISABLED");
+    PU_DEBUG_PRINTLN("Current Threshold Adjustment: DISABLED");
     currThresholdCntMode = MODE_FIXED;
   }
 
   pinMode(FAN_CTRL_PIN, OUTPUT);    // 冷却ファン制御ピンの初期化
-  digitalWrite(FAN_CTRL_PIN, LOW);  // ★ 起動時は必ずOFF
+  digitalWrite(FAN_CTRL_PIN, FAN_OFF_LEVEL);  // ★ 起動時は必ずOFF
 
   DEBUG_PRINT("Firmware: ");
   DEBUG_PRINT(FirmwareVersion);
   if (rpmControlMode == MODE_VOLUME) {
-    DEBUG_PRINTLN(" (RPM Control: Volume)");
+    PU_DEBUG_PRINTLN(" (RPM Control: Volume)");
   } else {
-    DEBUG_PRINTLN(" (RPM Control: Fixed)");
+    PU_DEBUG_PRINTLN(" (RPM Control: Fixed)");
   }
   
   initializePins();
@@ -242,6 +272,10 @@ void loop() {
   handlePeriodicTasks();        // タイマー処理でトリガーされる定期処理（コマンド送信、ピーク電流測定）
 
   both_stop_check_task();       // ★追加★★ 両方停止出力ピンの制御タスク
+
+  debug_print_raw_buttons_on_change(); // デバッグ用：スイッチの状態変化を生ログ出力
+  debug_fan_pin_on_change();
+
 }
 
 // ================================================================
@@ -283,8 +317,8 @@ void initializePins() {
   pinMode(P_SW_STOP_PIN, INPUT_PULLUP);
   pinMode(EM_LAMP_PIN, OUTPUT);
   pinMode(P_LAMP_PIN, OUTPUT);
-  pinMode(LED_PUMP_RUN_PIN, OUTPUT);
-  pinMode(LED_PUMP_STOP_PIN, OUTPUT);
+  // pinMode(LED_PUMP_RUN_PIN, OUTPUT);
+  // pinMode(LED_PUMP_STOP_PIN, OUTPUT);
   pinMode(LED_ISR_PIN, OUTPUT);
   
   pinMode(LED_SERIAL_RX_PIN, OUTPUT);
@@ -343,24 +377,69 @@ void sendStopCommand() {
   }
   stop_command[7] = 0x55 - sum; // チェックサムを計算
   pump_write8(stop_command, "STOP"); // インバーターへ停止コマンド送信
-  DEBUG_PRINTLN("Sent: Stop Command to Inverter");
+  PU_DEBUG_PRINTLN("Sent: Stop Command to Inverter");
 }
 // ▲▲▲ ここまで追加 ▲▲▲
+
+// ============================================================
+// ★追加★ 固定コード確認コマンド(0x00) 送信
+// 仕様書：電源投入後最低1度は送信。リターンがあるまで再送。:contentReference[oaicite:7]{index=7}
+// ============================================================
+
+// 確認完了フラグ（ACKが取れたらtrueにする）
+volatile bool inverter_confirmed = false;
+
+// 9バイト送信（確認コマンド用）
+void pump_write9(const uint8_t cmd[9], const char* label) {
+  PUMP_SERIAL.write(cmd, 9);
+
+  // デバッグ表示（任意）
+  PU_DEBUG_PRINT("[PUMP] ");
+  PU_DEBUG_PRINT(label);
+  PU_DEBUG_PRINT(" : ");
+  for (int i = 0; i < 9; i++) {
+    if (cmd[i] < 0x10) PU_DEBUG_PRINT('0');
+    PU_DEBUG_PRINT(cmd[i], HEX);
+    PU_DEBUG_PRINT(' ');
+  }
+  PU_DEBUG_PRINTLN();
+}
+
+// チェックサム：D0～D8の総和が0x55になるようにする:contentReference[oaicite:8]{index=8}
+void sendConfirmCommand() {
+  // 仕様書の例そのまま（最後はchecksum=0x38）:contentReference[oaicite:9]{index=9}
+  uint8_t cmd[9] = {0x00, 0x01, 0x00, 0x03, 0x01, 0x12, 0x00, 0x06, 0x00};
+
+  uint8_t sum = 0;
+  for (int i = 0; i < 8; i++) sum += cmd[i];
+  cmd[8] = (uint8_t)(0x55 - sum);
+
+  pump_write9(cmd, "CONFIRM");
+}
+
 
 /**
  * @brief ポンプを停止させる（状態変更とコマンド送信）
  */
 void stopPump() {
-  if (pumpState != STATE_RUNNING) return; // すでに停止している場合は何もしない
 
+  //====================================================
+  // [重要] 「ポンプ未接続」や「状態ズレ」でも確実に表示を落とす
+  //====================================================
   pumpState = STATE_STOPPED;
-  sendStopCommand(); // 新しい関数を呼び出す 2025年9月16日
-  digitalWrite(FAN_CTRL_PIN, LOW);    // インバータ冷却ファンOFF
 
-  DEBUG_PRINTLN("Pump Stop Sequence Executed.");
+  //--- 稼働ランプOFF（※あなたの実ピン名に合わせて）---
+  digitalWrite(P_LAMP_PIN, LOW);        // 稼働ランプ（リレー/ランプ）
+  // digitalWrite(LED_PUMP_RUN_PIN, LOW);  // パネル上のRUN LED
+  // digitalWrite(LED_PUMP_STOP_PIN, HIGH);// STOP LEDがあるならON
+  fan_off();          // ★追加：停止で確実にファンOFF
+
+  //--- インバータ停止コマンド（接続されていないなら副作用なし）---
+  sendStopCommand();
+
+  PU_DEBUG_PRINTLN("Pump Stop Sequence Executed (lamp forced OFF).");
 }
 
-// スイッチ検出処理
 // スイッチ検出処理
 void handleSwitchInputs() {
   // ポンプスタートボタン
@@ -368,10 +447,10 @@ void handleSwitchInputs() {
     if (pumpState == STATE_STOPPED) {
       // pumpState = STATE_RUNNING;
       // pumpStartTime = millis();
-      DEBUG_PRINTLN("Pump Start Switch ON");
+      PU_DEBUG_PRINTLN("Pump Start Switch ON");
       // ▼▼▼ ここから変更 ▼▼▼ 2025年9月16日
       // 起動前に一度停止コマンドを送り、インバーターの状態をリセットする
-      DEBUG_PRINTLN("Sending pre-start stop command to clear inverter state.");
+      PU_DEBUG_PRINTLN("Sending pre-start stop command to clear inverter state.");
       sendStopCommand();
       delay(50); // コマンド送信の間隔を少し空ける
     
@@ -384,16 +463,26 @@ void handleSwitchInputs() {
       pumpState = STATE_RUNNING;
       pumpStartTime = millis();
       // ▲▲▲ ここまで変更 ▲▲▲
-      digitalWrite(FAN_CTRL_PIN, HIGH);   // ★ インバータ冷却ファンON
+      // digitalWrite(FAN_CTRL_PIN, FAN_ON_LEVEL);   // ★ インバータ冷却ファンON
+      fan_on();
     }
   }
 
   // ポンプストップボタン
   if (isButtonPressed(pumpStopSwitch)) {
+
+    //====================================================
+    // [改善] 停止中でも「押されたこと」は必ずログに出す
+    //====================================================
+    PU_DEBUG_PRINT("Pump Stop Switch ON (state=");
+    PU_DEBUG_PRINT(pumpState == STATE_RUNNING ? "RUNNING" : "STOPPED");
+    PU_DEBUG_PRINTLN(")");
+
+    //====================================================
+    // [従来動作] 実際の停止処理はRUNNINGのときだけ
+    //====================================================
     if (pumpState == STATE_RUNNING) {
-      // pumpState = STATE_STOPPED;
-      DEBUG_PRINTLN("Pump Stop Switch ON");
-      stopPump(); // ★stopPump関数を呼び出すだけにする
+      stopPump();
     }
   }
 }
@@ -404,8 +493,8 @@ void updateSystemState() {
 
   if (pumpState == STATE_RUNNING) {
     digitalWrite(P_LAMP_PIN, HIGH);
-    digitalWrite(LED_PUMP_RUN_PIN, HIGH);
-    digitalWrite(LED_PUMP_STOP_PIN, LOW);
+    // digitalWrite(LED_PUMP_RUN_PIN, HIGH);
+    // digitalWrite(LED_PUMP_STOP_PIN, LOW);
 
     unsigned long elapsedTimeSec = (millis() - pumpStartTime) / 1000UL;
 
@@ -415,10 +504,10 @@ void updateSystemState() {
 
       if (maxCurrentSinceStart < PUMP_CURRENT_THRESHOLD) {
         pumpStartupError = true;
-        DEBUG_PRINT("Pump startup failed: maxCurrentSinceStart=");
-        DEBUG_PRINT(maxCurrentSinceStart);
-        DEBUG_PRINT(" < threshold=");
-        DEBUG_PRINTLN(PUMP_CURRENT_THRESHOLD);
+        PU_DEBUG_PRINT("Pump startup failed: maxCurrentSinceStart=");
+        PU_DEBUG_PRINT(maxCurrentSinceStart);
+        PU_DEBUG_PRINT(" < threshold=");
+        PU_DEBUG_PRINTLN(PUMP_CURRENT_THRESHOLD);
 
         stopPump();
         digitalWrite(EM_LAMP_PIN, HIGH); // 非常停止ランプ点灯
@@ -431,15 +520,15 @@ void updateSystemState() {
     // ★既存仕様★ 過電流保護（ロジック自体はそのまま維持）
     if (elapsedTimeSec > PUMP_TIMEOUT_SEC &&
         lastCurrentPeak > PUMP_CURRENT_THRESHOLD) {
-      DEBUG_PRINTLN("Pump stopped automatically due to over current.");
+      PU_DEBUG_PRINTLN("Pump stopped automatically due to over current.");
       stopPump();
       digitalWrite(EM_LAMP_PIN, HIGH); // 過電流でも非常停止ランプ点灯
     }
 
   } else {
     digitalWrite(P_LAMP_PIN, LOW);
-    digitalWrite(LED_PUMP_RUN_PIN, LOW);
-    digitalWrite(LED_PUMP_STOP_PIN, HIGH);
+    // digitalWrite(LED_PUMP_RUN_PIN, LOW);
+    // digitalWrite(LED_PUMP_STOP_PIN, HIGH);
   }
 }
 
@@ -460,13 +549,125 @@ void updateDisplays() {
 }
 
 // シリアルからのコマンド受信可否によるLED点灯消灯
+#if 0
 void handleSerialCommunication() {
-#if 1
+  static uint8_t buf[32];
+  static uint8_t idx = 0;
+  static uint8_t expected = 0;
+
+  // デバッグ用: handleSerialCommunication() 内の最初に追加
+  if (PUMP_SERIAL.available()) {
+    PU_DEBUG_PRINT("RX RAW: ");
+    while (PUMP_SERIAL.available()) {
+      int b = PUMP_SERIAL.read();
+      if (b < 0x10) PU_DEBUG_PRINT("0");
+      PU_DEBUG_PRINT(b, HEX);
+      PU_DEBUG_PRINT(" ");
+      delay(1);
+    }
+    PU_DEBUG_PRINTLN("");
+  }
+
+  
+  while (PUMP_SERIAL.available() > 0) {
+    uint8_t b = (uint8_t)PUMP_SERIAL.read();
+
+    // 受信インジケータ
+    digitalWrite(LED_SERIAL_RX_PIN, HIGH);
+
+    // フレーム同期：先頭は基本 01 00（スレーブ→マスター）:contentReference[oaicite:16]{index=16}
+    if (idx == 0) {
+      if (b != 0x01) continue;
+    } else if (idx == 1) {
+      if (b != 0x00) { idx = 0; continue; }
+    }
+
+    buf[idx++] = b;
+
+    // D3まで来たら、期待長を決める
+    if (idx == 4) {
+      uint8_t d3 = buf[3];          // Data length-1
+      expected = (uint8_t)(d3 + 6); // total bytes
+      if (expected > sizeof(buf)) { // 異常防御
+        idx = 0; expected = 0;
+        continue;
+      }
+    }
+
+    // フレーム完成
+    if (expected > 0 && idx >= expected) {
+      // チェックサム：総和が0x55 になるか確認（仕様書）:contentReference[oaicite:17]{index=17}
+      uint8_t sum = 0;
+      for (uint8_t i = 0; i < expected; i++) sum += buf[i];
+      bool checksum_ok = (sum == 0x55);
+
+      uint8_t cmd = buf[2];
+
+      if (!checksum_ok) {
+        PU_DEBUG_PRINTLN("RX checksum NG -> drop frame");
+      } else {
+        // --- 確認応答(0x00) ---
+        if (cmd == 0x00 && expected == 9) {
+          // 固定コード一致なら confirmed
+          if (buf[4] == 0x01 && buf[5] == 0x12 && buf[6] == 0x00 && buf[7] == 0x06) {
+            inverter_confirmed = true;
+            PU_DEBUG_PRINTLN("Inverter CONFIRMED (fixed code OK)");
+          } else {
+            inverter_confirmed = false;
+            PU_DEBUG_PRINTLN("Inverter CONFIRM mismatch");
+          }
+        }
+
+        // --- 運転応答(0x10) ---
+        if (cmd == 0x10) {
+          // あなたの既存処理（errorCode=buf[7]等）に合わせて必要ならここで展開
+          // ※「どのバイトがエラーコードか」は仕様書の応答レイアウトに準拠して整理してください
+          // for debug:無事動いたら消す
+          // 期待：R3(Data length-1)=0x07 → 全長13バイト :contentReference[oaicite:13]{index=13}
+
+          // バッファ buf[] が 13 バイト揃っている前提
+          const uint8_t target = buf[4]; // R4 目標周波数
+          const uint8_t actual = buf[5]; // R5 実運転周波数
+          const uint8_t err    = buf[7]; // R7 エラーコード :contentReference[oaicite:14]{index=14}
+          const uint8_t temp   = buf[8]; // R8 IPM温度 :contentReference[oaicite:15]{index=15}
+
+          PU_DEBUG_PRINT("[ACK 0x10] target=0x");
+          if (target < 0x10) PU_DEBUG_PRINT("0");
+          PU_DEBUG_PRINT(target, HEX);
+
+          PU_DEBUG_PRINT(" actual=0x");
+          if (actual < 0x10) PU_DEBUG_PRINT("0");
+          PU_DEBUG_PRINT(actual, HEX);
+
+          PU_DEBUG_PRINT(" err=0x");
+          if (err < 0x10) PU_DEBUG_PRINT("0");
+          PU_DEBUG_PRINT(err, HEX);
+
+          PU_DEBUG_PRINT(" (");
+          PU_DEBUG_PRINT(motor_err_str(err));
+          PU_DEBUG_PRINT(")");
+
+          PU_DEBUG_PRINT(" temp=");
+          PU_DEBUG_PRINT(temp);
+          PU_DEBUG_PRINTLN("C");
+        }
+      }
+
+      // 次フレームへ
+      idx = 0;
+      expected = 0;
+
+      digitalWrite(LED_SERIAL_RX_PIN, LOW);
+    }
+  }
+
+  digitalWrite(LED_SERIAL_RX_PIN, LOW);
+  #if 0
   // インバーターからの応答を受信・解析する
   while (PUMP_SERIAL.available() > 0) {
     digitalWrite(LED_SERIAL_RX_PIN, HIGH); // 受信中にLED点灯
 
-    byte incomingByte = Serial.read();
+    byte incomingByte = PUMP_SERIAL.read();
 
     // バッファにデータを格納
     if (responseByteCount < INVERTER_RESPONSE_SIZE) {
@@ -487,10 +688,10 @@ void handleSerialCommunication() {
           // 要件①：コマンドを送らずに、プログラムの状態を停止に移行する
           pumpState = STATE_STOPPED;
           digitalWrite(EM_LAMP_PIN, HIGH); // 非常停止ランプ点灯 2025年9月17日
-          DEBUG_PRINT("Inverter Error Detected! Code: 0x");
-          if (errorCode < 0x10) DEBUG_PRINT("0"); // 見やすいようにゼロ埋め
-          DEBUG_PRINTLN(errorCode, HEX);
-          DEBUG_PRINTLN("Transitioning to STOPPED mode without sending command.");
+          PU_DEBUG_PRINT("Inverter Error Detected! Code: 0x");
+          if (errorCode < 0x10) PU_DEBUG_PRINT("0"); // 見やすいようにゼロ埋め
+          PU_DEBUG_PRINTLN(errorCode, HEX);
+          PU_DEBUG_PRINTLN("Transitioning to STOPPED mode without sending command.");
         }
       }
       
@@ -498,23 +699,132 @@ void handleSerialCommunication() {
     }
   }
   digitalWrite(LED_SERIAL_RX_PIN, LOW); // 受信処理後にLED消灯
-#else
-  if (PUMP_SERIAL.available() > 0) {
-    digitalWrite(LED_SERIAL_RX_PIN, HIGH);
-    DEBUG_PRINT("Received: ");
-    while (PUMP_SERIAL.available() > 0) {
-      int val = Serial.read();
-      if (val < 0x10) {
-        DEBUG_PRINT("0"); // 見やすいように0を補完
-      }
-      DEBUG_PRINT(val, HEX);
-      DEBUG_PRINT(" ");
-      delay(2);
-    }
-    DEBUG_PRINTLN(""); // 最後に改行
-    digitalWrite(LED_SERIAL_RX_PIN, LOW);
-  }
 #endif
+
+// 受信生ダンプ（切り分け用）
+#if 1
+  while (PUMP_SERIAL.available() > 0) {
+    digitalWrite(LED_SERIAL_RX_PIN, HIGH);
+    byte incomingByte = PUMP_SERIAL.read();
+    if (responseByteCount < INVERTER_RESPONSE_SIZE) {
+      inverterResponseBuffer[responseByteCount++] = incomingByte;
+    }
+    if (responseByteCount >= INVERTER_RESPONSE_SIZE) {
+      if (inverterResponseBuffer[0] == 0x01 && inverterResponseBuffer[1] == 0x00 && inverterResponseBuffer[2] == 0x10) {
+        byte errorCode = inverterResponseBuffer[7];
+        if (errorCode != 0x00 && pumpState == STATE_RUNNING) {
+          pumpState = STATE_STOPPED;
+          digitalWrite(EM_LAMP_PIN, HIGH);
+          PU_DEBUG_PRINT("Inverter Error Detected! Code: 0x");
+          if (errorCode < 0x10) PU_DEBUG_PRINT("0");
+          PU_DEBUG_PRINTLN(errorCode, HEX);
+        }
+      }
+      responseByteCount = 0;
+    }
+  }
+  digitalWrite(LED_SERIAL_RX_PIN, LOW);
+#endif
+}
+#endif
+//====================================================
+// インバーター応答の受信（可変長フレーム）
+// - 「総和が0x55」になるチェックサム方式
+// - d3(Data length-1) から全長を決めてフレームを復元
+// - ★重要★ 受信処理はここ1本に統一する（RAW dump等は消す）
+//====================================================
+//====================================================
+// インバーター応答の受信（可変長フレーム）
+// - 「総和が0x55」になるチェックサム方式
+// - d3(Data length-1) から全長を決めてフレームを復元
+// - ★重要★ 受信処理はここ1本に統一する（RAW dump等は消す）
+//====================================================
+void handleSerialCommunication() {
+  static uint8_t buf[32];
+  static uint8_t idx = 0;
+  static uint8_t expected = 0;
+
+  while (PUMP_SERIAL.available() > 0) {
+    digitalWrite(LED_SERIAL_RX_PIN, HIGH);
+
+    uint8_t b = (uint8_t)PUMP_SERIAL.read();
+
+    // 受信バッファへ格納（溢れ防止）
+    if (idx < sizeof(buf)) {
+      buf[idx++] = b;
+    } else {
+      // ありえない長さになったら捨ててやり直し
+      idx = 0;
+      expected = 0;
+      digitalWrite(LED_SERIAL_RX_PIN, LOW);
+      continue;
+    }
+
+    // ヘッダが揃って、長さが確定できる段階になったら expected を計算
+    // フォーマット: [addr2][cmd1][len1][data...][checksum1]
+    // len は "Data length - 1" と仕様にあるので total = len + 6 を想定
+    if (idx == 4) {
+      uint8_t d3 = buf[3];              // Data length-1
+      expected = (uint8_t)(d3 + 6);     // total bytes
+      if (expected > sizeof(buf)) {     // 異常防御
+        idx = 0;
+        expected = 0;
+        digitalWrite(LED_SERIAL_RX_PIN, LOW);
+        continue;
+      }
+    }
+
+    // フレーム完成
+    if (expected > 0 && idx >= expected) {
+      // チェックサム：総和が0x55になるか確認
+      uint8_t sum = 0;
+      for (uint8_t i = 0; i < expected; i++) sum += buf[i];
+      bool checksum_ok = (sum == 0x55);
+
+      // 見える化：受信フレームを必ず1回表示（切り分け用）
+      PU_DEBUG_PRINT("RX FRAME: ");
+      for (uint8_t i = 0; i < expected; i++) {
+        if (buf[i] < 0x10) PU_DEBUG_PRINT("0");
+        PU_DEBUG_PRINT(buf[i], HEX);
+        PU_DEBUG_PRINT(" ");
+      }
+      PU_DEBUG_PRINTLN("");
+
+      if (!checksum_ok) {
+        PU_DEBUG_PRINTLN("RX checksum NG -> drop frame");
+      } else {
+        uint8_t cmd = buf[2];
+
+        // 0x00: CONFIRM 応答（あなたの固定コードに合わせる）
+        if (cmd == 0x00 && expected == 9) {
+          if (buf[4] == 0x01 && buf[5] == 0x12 && buf[6] == 0x00 && buf[7] == 0x06) {
+            inverter_confirmed = true;
+            PU_DEBUG_PRINTLN("Inverter CONFIRMED (fixed code OK)");
+          } else {
+            inverter_confirmed = false;
+            PU_DEBUG_PRINTLN("Inverter CONFIRM mismatch");
+          }
+        }
+
+        // 0x10: 運転系 応答（とりあえずエラーコードらしき位置を表示）
+        if (cmd == 0x10) {
+          // ※ ここは仕様書の「応答レイアウト」に合わせて確定させる
+          // いまは“見える化”としてbuf[7]を出す（既存コードがそう想定しているため）
+          uint8_t errorCode = buf[7];
+          PU_DEBUG_PRINT("Inverter RUN RESP errorCode?=0x");
+          if (errorCode < 0x10) PU_DEBUG_PRINT("0");
+          PU_DEBUG_PRINTLN(errorCode, HEX);
+        }
+      }
+
+      // 次フレームへ
+      idx = 0;
+      expected = 0;
+      digitalWrite(LED_SERIAL_RX_PIN, LOW);
+    }
+  }
+
+  digitalWrite(LED_SERIAL_RX_PIN, LOW);
 }
 
 // タイマー処理でトリガーされる定期処理（コマンド送信、ピーク電流測定）
@@ -529,26 +839,33 @@ void handlePeriodicTasks() {
   if (commandTimerCount >= (COMMAND_INTERVAL_MS / TIMER_INTERVAL_MS)) {
     commandTimerCount = 0;
     if (pumpState == STATE_RUNNING) {
-        double analog_value_f = (rpm_value + 5.092) / 17.945;
-        if (analog_value_f > 139.6) analog_value_f = 139.6;
-        if (analog_value_f < 34.0) analog_value_f = 34.0;
-        byte analog_value = (byte)analog_value_f;
+      double analog_value_f = (rpm_value + 5.092) / 17.945;
+      if (analog_value_f > 139.6) analog_value_f = 139.6;
+      if (analog_value_f < 34.0) analog_value_f = 34.0;
+      byte analog_value = (byte)analog_value_f;
 
-        byte command[8] = {0x00, 0x01, 0x10, 0x02, analog_value, 0x01, 0x00, 0x00};
-        byte sum = 0;
-        for(int i=0; i < 7; i++) { sum += command[i]; }
-        command[7] = 0x55 - sum;
-        pump_write8(command, "RPM"); // インバーターへ回転数コマンド送信
-        DEBUG_PRINT("Sent: Set RPM Command to Inverter - RPM=");  DEBUG_PRINTLN(rpm_value);
+      // byte command[8] = {0x00, 0x01, 0x10, 0x02, analog_value, 0x01, 0x00, 0x00};
+      // ★重要★ 継続運転なら D5=0xFF を推奨（運転継続側）
+      // 仕様の細部はPDFの「周波数変更時間」や継続運転の注記に従う:contentReference[oaicite:14]{index=14}
+      byte command[8] = {0x00, 0x01, 0x10, 0x02, analog_value, 0xFF, 0x00, 0x00};
+
+      byte sum = 0;
+      for(int i=0; i < 7; i++) { sum += command[i]; }
+      command[7] = 0x55 - sum;
+      pump_write8(command, "RPM"); // インバーターへ回転数コマンド送信
+#if DEBUG_RPM_EACH_SEND
+      PU_DEBUG_PRINT("Sent: Set RPM Command to Inverter - RPM=");
+      PU_DEBUG_PRINTLN(rpm_value);
+#endif    
     }else{
-        // // ポンプ停止中は回転数0のコマンドを送信する
-        // byte stop_command[8] = {0x00, 0x01, 0x10, 0x02, 0x00, 0x01, 0x00, 0x00};
-        // byte sum = 0;
-        // for(int i=0; i < 7; i++) {
-        //   sum += stop_command[i];
-        // }
-        // stop_command[7] = 0x55 - sum; // チェックサムを計算
-        // PUMP_SERIAL.write(stop_command, 8);
+      // // ポンプ停止中は回転数0のコマンドを送信する
+      // byte stop_command[8] = {0x00, 0x01, 0x10, 0x02, 0x00, 0x01, 0x00, 0x00};
+      // byte sum = 0;
+      // for(int i=0; i < 7; i++) {
+      //   sum += stop_command[i];
+      // }
+      // stop_command[7] = 0x55 - sum; // チェックサムを計算
+      // PUMP_SERIAL.write(stop_command, 8);
     }
   }
 }
@@ -627,8 +944,8 @@ void measurePeakCurrent() {
     // 確定したピーク値が、初期値(512)より大きい場合のみ有効なピークとする
     if (current_reading_max > 512) {
       lastCurrentPeak = current_reading_max;
-      DEBUG_PRINT("Current Peak (Smoothed): ");
-      DEBUG_PRINTLN(lastCurrentPeak);
+      // PU_DEBUG_PRINT("Current Peak (Smoothed): ");
+      // PU_DEBUG_PRINTLN(lastCurrentPeak);
 
       // ★追加★ ポンプ起動中の最大電流と「しきい値到達」を記録 2025-12-09
       if (pumpState == STATE_RUNNING) {
@@ -637,13 +954,13 @@ void measurePeakCurrent() {
         }
         if (!pumpStartupOk && lastCurrentPeak >= PUMP_CURRENT_THRESHOLD) {
           pumpStartupOk = true;
-          DEBUG_PRINTLN("Pump startup current reached threshold.");
+          PU_DEBUG_PRINTLN("Pump startup current reached threshold.");
         }
       }
 
     } else {
       lastCurrentPeak = 0; // または512など、無効を示す値
-      DEBUG_PRINTLN("No valid peak detected.");
+      PU_DEBUG_PRINTLN("No valid peak detected.");
     }
     
     // 次の測定期間のためにリセット
@@ -664,8 +981,8 @@ void measurePeakCurrent() {
   analog_cnt++;
   if (analog_cnt >= (1500 / TIMER_INTERVAL_MS)) {
     lastCurrentPeak = current_reading_max;
-    DEBUG_PRINT("Current Peak: ");
-    DEBUG_PRINTLN(lastCurrentPeak);
+    PU_DEBUG_PRINT("Current Peak: ");
+    PU_DEBUG_PRINTLN(lastCurrentPeak);
     current_reading_max = 512;
     analog_cnt = 0;
   }
@@ -681,8 +998,6 @@ int getTargetRpm() {
   if (pumpState == STATE_RUNNING) {
     unsigned long elapsedTimeMillis = millis() - pumpStartTime;
     if (elapsedTimeMillis < (PRIMING_DURATION_SEC * 1000UL)) {
-      // --- ▼▼▼ ここから修正箇所 ▼▼▼ ---
-
       // 1. 定数を定義
       const float RAMP_CYCLE_SEC = PRIMING_CYCLE_SEC; // 回転数が上下する時間（4秒）
       // const float HOLD_DURATION_SEC = 2.0;          // 最高回転数での保持時間（秒）
@@ -721,7 +1036,6 @@ int getTargetRpm() {
       int targetRpm = (int)(rpm_midpoint + (sinValue * rpm_range / 2.0));
       
       return targetRpm;
-      // --- ▲▲▲ ここまで修正箇所 ▲▲▲ ---
     }
   }
 
@@ -804,23 +1118,79 @@ void trim(char* str) {
   }
 }
 // ★追加★★ 両方停止出力ピンの制御タスク
+//====================================================
+// [仕様] アワーメーターリセット
+//  - UVあり(detectedLamps>0) : (P_STOP + UV_STOP) 同時押し も有効
+//  - 全機種共通            : P_STOP の長押しでも実行（UVボタン無し機種対策）
+//  - 1回の押下シーケンスで1回だけ発火（連打/二重発火防止）
+//====================================================
 void both_stop_check_task() {
-    // チャタリング処理後の安定状態
-    bool pumpStop = (pumpStopSwitch.stableState == LOW);
-    bool uvStop   = (uvStopSwitch.stableState   == LOW);
 
-    if (pumpStop && uvStop) {
-        // 両STOP同時押し検出
-        if (!hourMeterResetComboLatched) {
-            hourMeterResetComboLatched = true;
+    //---- 調整ポイント：長押し判定時間 ----
+    const unsigned long LONGPRESS_MS = 2000;  // 例：2秒（好きに変えてOK）
+
+    //---- チャタリング後の安定状態（押下=LOW 前提）----
+    const bool pumpStopPressed = (pumpStopSwitch.stableState == LOW);
+
+    // UVボタンは「物理的に無い機種」があるので、
+    // UVあり判定（detectedLamps>0）のときだけ参照する
+    const bool uvPresent = (detectedLamps > 0);
+    const bool uvStopPressed = (uvPresent && (uvStopSwitch.stableState == LOW));
+
+    //================================================
+    // この関数内だけで状態保持（1箇所修正のためstaticで完結）
+    //================================================
+    static unsigned long pressStartMs = 0;  // ポンプ停止ボタン押下開始時刻
+    static bool firedThisPress = false;     // 押しっぱなしでの多重発火防止
+
+    //================================================
+    // 1) UVありのときだけ：同時押し（即時）でリセット
+    //================================================
+    if (uvPresent && pumpStopPressed && uvStopPressed) {
+
+        // 同時押しは「即時」で1回だけ
+        if (!firedThisPress) {
+            firedThisPress = true;                // 先にラッチ（超重要：二重発火防止）
+            hourMeterResetComboLatched = true;    // 既存ラッチも立てておく（互換維持）
+
             DEBUG_PRINTLN("Hour meter reset by P_SW_STOP + UV_SW_STOP combo.");
             resetUvHourMeter();
         }
+
+        // 同時押し中は長押しタイマは使わない（誤発火防止）
+        pressStartMs = 0;
+        return;
+    }
+
+    //================================================
+    // 2) 全機種共通：ポンプ停止ボタン長押しでリセット
+    //================================================
+    if (pumpStopPressed) {
+
+        // 押し始めを検出してタイマ開始
+        if (pressStartMs == 0) {
+            pressStartMs = millis();
+        }
+
+        // 規定時間を超えたら「1回だけ」リセット
+        if (!firedThisPress && (millis() - pressStartMs >= LONGPRESS_MS)) {
+            firedThisPress = true;                // 先にラッチ
+            hourMeterResetComboLatched = true;    // 既存ラッチも立てておく（互換維持）
+
+            DEBUG_PRINTLN("Hour meter reset by long press of P_SW_STOP.");
+            resetUvHourMeter();
+        }
+
     } else {
-        // どちらかでも離されたら、次の同時押しに備えてラッチ解除
+        //================================================
+        // 3) ボタンを離したら全ラッチ解除（次の操作に備える）
+        //================================================
+        pressStartMs = 0;
+        firedThisPress = false;
         hourMeterResetComboLatched = false;
     }
 }
+
 // -------------------------------------------------------------
 // アワーメーターリセット
 // HOURMETER_RESET_PIN を一定時間アクティブにしてリセットをかける
@@ -835,18 +1205,89 @@ void resetUvHourMeter() {
 //====================================================
 // [追加] 8バイト固定の送信を統一（デバッグログもここに集約）
 //====================================================
-void pump_write8(const uint8_t cmd[8], const char* tag) {
+void pump_write8(const uint8_t cmd[8], const char* label) {
   // 送信
   PUMP_SERIAL.write(cmd, 8);
 
   // デバッグ（USB側に出す）
-  Serial.print("[PUMP] ");
-  Serial.print(tag);
-  Serial.print(" : ");
+  PU_DEBUG_PRINT("[PUMP] ");
+  PU_DEBUG_PRINT(label);
+  PU_DEBUG_PRINT(" : ");
   for (int i = 0; i < 8; i++) {
-    if (cmd[i] < 0x10) Serial.print('0');
-    Serial.print(cmd[i], HEX);
-    Serial.print(' ');
+    if (cmd[i] < 0x10) PU_DEBUG_PRINT('0');
+    PU_DEBUG_PRINT(cmd[i], HEX);
+    PU_DEBUG_PRINT(' ' );
   }
-  Serial.println();
+  PU_DEBUG_PRINTLN();
+
+  //====================================================
+  // [追加] RPMを送る＝インバータ動作中なのでファンON
+  //====================================================
+  // if (label && strcmp(label, "RPM") == 0) {
+  //   fan_on();   // ※ファンがLOWアクティブならLOWにする
+  //   PU_DEBUG_PRINTLN("pump_write8: FAN_CTRL_PIN set HIGH (RPM command sent)");
+  // } else {
+  //   // それ以外のコマンドはファンOFF（停止コマンド等）
+  //   fan_off();    // ※ファンがLOWアクティブならLOWにする
+  //   PU_DEBUG_PRINTLN("pump_write8: FAN_CTRL_PIN set LOW (non-RPM command sent)");
+  // }
+}
+
+//====================================================
+// [切り分け] スタート/停止ピンの生値を「変化時だけ」表示
+//====================================================
+void debug_print_raw_buttons_on_change() {
+  static int lastStart = -1;
+  static int lastStop  = -1;
+
+  int nowStart = digitalRead(P_SW_START_PIN);
+  int nowStop  = digitalRead(P_SW_STOP_PIN);
+
+  if (nowStart != lastStart) {
+    Serial.print("[RAW] START pin=");
+    Serial.println(nowStart);   // 0 or 1
+    lastStart = nowStart;
+  }
+  if (nowStop != lastStop) {
+    Serial.print("[RAW] STOP  pin=");
+    Serial.println(nowStop);    // 0 or 1
+    lastStop = nowStop;
+  }
+}
+//====================================================
+// [切り分け] FANピンが揺れているかを変化時だけ表示
+//====================================================
+void debug_fan_pin_on_change() {
+  static int last = -1;
+  int now = digitalRead(FAN_CTRL_PIN);
+  if (now != last) {
+    Serial.print("[RAW] FAN pin=");
+    Serial.println(now);
+    last = now;
+  }
+}
+
+// for debug:無事動いたら削除してよい
+//====================================================
+// 0x10 応答のエラーコード文字列化（仕様書の項目）
+//====================================================
+const char* motor_err_str(uint8_t code) {
+  switch (code) {
+    case 0x00: return "正常";
+    // 以降の並びは仕様書の「項目」列に対応 :contentReference[oaicite:11]{index=11}
+    case 0x01: return "インバータ直流過電圧";
+    case 0x02: return "インバータ直流低電圧";
+    case 0x03: return "インバータ交流過電流";
+    case 0x04: return "速度推定下限エラー(脱調)";
+    case 0x05: return "欠相検出1(速度推定脈動)";
+    case 0x06: return "欠相検出2(電流アンバランス)";
+    case 0x07: return "IPMエラー1(エッジ検出)";
+    case 0x08: return "IPMエラー2(レベル検出)";
+    case 0x09: return "電流センサ異常";
+    case 0x0B: return "インバータPWM端子異常(端子電圧不安定等)";
+    case 0x0C: return "通信エラー(6秒以上コマンド途絶で停止)";
+    case 0x0D: return "COM/Dutyモード設定異常";
+    case 0x0E: return "IPM温度異常";
+    default:   return "不明(仕様外)";
+  }
 }

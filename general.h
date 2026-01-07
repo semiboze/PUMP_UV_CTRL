@@ -1,4 +1,7 @@
-
+#ifndef GENERAL_H_INCLUDED
+#define GENERAL_H_INCLUDED
+//====================================================
+// general.h - 共通設定・マクロ・型定義
 
 // --- 変更点: Serial.printをマクロ化 ---
 // DEBUG_MODEが定義されている時だけ、DEBUG_PRINTがSerial.printとして機能します。
@@ -9,6 +12,20 @@
 #else
   #define DEBUG_PRINT(...)
   #define DEBUG_PRINTLN(...)
+#endif
+#ifdef UV_DEBUG_MODE
+  #define UV_DEBUG_PRINT(...)    Serial.print(__VA_ARGS__)
+  #define UV_DEBUG_PRINTLN(...)  Serial.println(__VA_ARGS__)
+#else
+  #define UV_DEBUG_PRINT(...)
+  #define UV_DEBUG_PRINTLN(...)
+#endif
+#ifdef PU_DEBUG_MODE
+  #define PU_DEBUG_PRINT(...)    Serial.print(__VA_ARGS__)
+  #define PU_DEBUG_PRINTLN(...)  Serial.println(__VA_ARGS__)
+#else
+  #define PU_DEBUG_PRINT(...)
+  #define PU_DEBUG_PRINTLN(...)
 #endif
 
 // --- ここから共通型定義・共有シンボル宣言 ---
@@ -53,3 +70,8 @@ extern Switch pumpStopSwitch;
 //====================================================
 static const uint8_t RELAY_ON  = LOW;
 static const uint8_t RELAY_OFF = HIGH;
+
+const int MAX_UV_LAMPS = 10;
+
+#endif  // GENERAL_H_INCLUDED
+// --- ここまで共通型定義・共有シンボル宣言 ---
