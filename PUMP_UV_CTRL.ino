@@ -152,6 +152,7 @@ void measurePeakCurrent();        // ポンプのピーク電流を測定
 int getTargetRpm();               // 目標回転数を取得
 int calculateRpmFromVolume();     // 可変抵抗から回転数を計算
 void trim(char* str);             // 文字列の前後の空白を削除
+void sendRpmCommand(int rpm);     // 回転数コマンド送信
 void updateCurrentThreshold();    // しきい値を更新する関数のプロトタイプ宣言
 void updateTCntPin();             // ★★★ T_CNT_PINを制御する関数のプロトタイプ宣言 ★★★
 void runStartupLedSequence(int);  // 起動時のLEDシーケンス
@@ -421,6 +422,26 @@ void sendStopCommand() {
 }
 // ▲▲▲ ここまで追加 ▲▲▲
 
+// 回転数コマンド送信（ポンプ起動時や定期送信で使用）
+void sendRpmCommand(int rpm) {
+  double analog_value_f = (rpm + 5.092) / 17.945;
+  if (analog_value_f > 139.6) analog_value_f = 139.6;
+  if (analog_value_f < 34.0) analog_value_f = 34.0;
+  byte analog_value = (byte)analog_value_f;
+
+  // ★重要★ 継続運転なら D5=0xFF を推奨（運転継続側）
+  byte command[8] = {0x00, 0x01, 0x10, 0x02, analog_value, 0xFF, 0x00, 0x00};
+
+  byte sum = 0;
+  for(int i = 0; i < 7; i++) { sum += command[i]; }
+  command[7] = 0x55 - sum;
+  pump_write8(command, "RPM"); // インバーターへ回転数コマンド送信
+#if DEBUG_RPM_EACH_SEND
+  PU_DEBUG_PRINT("Sent: Set RPM Command to Inverter - RPM=");
+  PU_DEBUG_PRINTLN(rpm);
+#endif
+}
+
 // ============================================================
 // ★追加★ 固定コード確認コマンド(0x00) 送信
 // 仕様書：電源投入後最低1度は送信。リターンがあるまで再送。:contentReference[oaicite:7]{index=7}
@@ -516,6 +537,12 @@ void handleSwitchInputs() {
       //====================================================
       pumpState = STATE_RUNNING;
       pumpStartTime = millis();
+
+      //====================================================
+      // [改善] 体感レスポンス向上のため、起動直後に回転数コマンドを即送信
+      //====================================================
+      rpm_value = getTargetRpm();
+      sendRpmCommand(rpm_value);
     }
   }
   // ポンプストップボタン
@@ -887,24 +914,7 @@ void handlePeriodicTasks() {
   if (commandTimerCount >= (COMMAND_INTERVAL_MS / TIMER_INTERVAL_MS)) {
     commandTimerCount = 0;
     if (pumpState == STATE_RUNNING) {
-      double analog_value_f = (rpm_value + 5.092) / 17.945;
-      if (analog_value_f > 139.6) analog_value_f = 139.6;
-      if (analog_value_f < 34.0) analog_value_f = 34.0;
-      byte analog_value = (byte)analog_value_f;
-
-      // byte command[8] = {0x00, 0x01, 0x10, 0x02, analog_value, 0x01, 0x00, 0x00};
-      // ★重要★ 継続運転なら D5=0xFF を推奨（運転継続側）
-      // 仕様の細部はPDFの「周波数変更時間」や継続運転の注記に従う:contentReference[oaicite:14]{index=14}
-      byte command[8] = {0x00, 0x01, 0x10, 0x02, analog_value, 0xFF, 0x00, 0x00};
-
-      byte sum = 0;
-      for(int i=0; i < 7; i++) { sum += command[i]; }
-      command[7] = 0x55 - sum;
-      pump_write8(command, "RPM"); // インバーターへ回転数コマンド送信
-#if DEBUG_RPM_EACH_SEND
-      PU_DEBUG_PRINT("Sent: Set RPM Command to Inverter - RPM=");
-      PU_DEBUG_PRINTLN(rpm_value);
-#endif    
+      sendRpmCommand(rpm_value);
     }else{
       // // ポンプ停止中は回転数0のコマンドを送信する
       // byte stop_command[8] = {0x00, 0x01, 0x10, 0x02, 0x00, 0x01, 0x00, 0x00};
