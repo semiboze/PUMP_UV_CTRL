@@ -273,8 +273,8 @@ void loop() {
 
   both_stop_check_task();       // ★追加★★ 両方停止出力ピンの制御タスク
 
-  debug_print_raw_buttons_on_change(); // デバッグ用：スイッチの状態変化を生ログ出力
-  debug_fan_pin_on_change();
+  // debug_print_raw_buttons_on_change(); // デバッグ用：スイッチの状態変化を生ログ出力
+  // debug_fan_pin_on_change();
 
 }
 
@@ -445,45 +445,53 @@ void handleSwitchInputs() {
   // ポンプスタートボタン
   if (isButtonPressed(pumpStartSwitch)) {
     if (pumpState == STATE_STOPPED) {
-      // pumpState = STATE_RUNNING;
-      // pumpStartTime = millis();
       PU_DEBUG_PRINTLN("Pump Start Switch ON");
-      // ▼▼▼ ここから変更 ▼▼▼ 2025年9月16日
-      // 起動前に一度停止コマンドを送り、インバーターの状態をリセットする
+
+      //====================================================
+      // [改善] 体感レスポンス最優先：押した瞬間にランプ点灯
+      // ・ユーザーに「受け付けた」を即表示
+      //====================================================
+      digitalWrite(P_LAMP_PIN, HIGH);  // まず点ける（この後エラーならstopPumpで消える）
+      fan_on();                        // ファンも先に回してOK
+
+      //====================================================
+      // 起動前に一度停止コマンドを送り、インバーターの状態をリセット
+      //====================================================
       PU_DEBUG_PRINTLN("Sending pre-start stop command to clear inverter state.");
       sendStopCommand();
-      delay(50); // コマンド送信の間隔を少し空ける
-    
-      // ★追加★ 起動監視関連をリセット 2025-12-09
+
+      // ★ここは長いほど体感が悪化するので最小に
+      delay(5);
+
+      //====================================================
+      // 起動監視関連をリセット
+      //====================================================
       pumpStartupOk        = false;
       pumpStartupError     = false;
       maxCurrentSinceStart = 0;
       digitalWrite(EM_LAMP_PIN, LOW);  // 以前のエラーで点灯していた非常停止ランプを消灯
 
+      //====================================================
+      // 状態遷移
+      //====================================================
       pumpState = STATE_RUNNING;
       pumpStartTime = millis();
-      // ▲▲▲ ここまで変更 ▲▲▲
-      // digitalWrite(FAN_CTRL_PIN, FAN_ON_LEVEL);   // ★ インバータ冷却ファンON
-      fan_on();
     }
   }
-
   // ポンプストップボタン
   if (isButtonPressed(pumpStopSwitch)) {
 
-    //====================================================
-    // [改善] 停止中でも「押されたこと」は必ずログに出す
-    //====================================================
+    // 押されたことは必ずログ
     PU_DEBUG_PRINT("Pump Stop Switch ON (state=");
     PU_DEBUG_PRINT(pumpState == STATE_RUNNING ? "RUNNING" : "STOPPED");
     PU_DEBUG_PRINTLN(")");
 
     //====================================================
-    // [従来動作] 実際の停止処理はRUNNINGのときだけ
+    // [改善] 状態に関係なく「強制停止」する
+    // ・pumpStateが何になってても必ず停止コマンド送る
+    // ・ランプも必ず消す
     //====================================================
-    if (pumpState == STATE_RUNNING) {
-      stopPump();
-    }
+    stopPump();
   }
 }
 
@@ -1231,40 +1239,6 @@ void pump_write8(const uint8_t cmd[8], const char* label) {
   //   fan_off();    // ※ファンがLOWアクティブならLOWにする
   //   PU_DEBUG_PRINTLN("pump_write8: FAN_CTRL_PIN set LOW (non-RPM command sent)");
   // }
-}
-
-//====================================================
-// [切り分け] スタート/停止ピンの生値を「変化時だけ」表示
-//====================================================
-void debug_print_raw_buttons_on_change() {
-  static int lastStart = -1;
-  static int lastStop  = -1;
-
-  int nowStart = digitalRead(P_SW_START_PIN);
-  int nowStop  = digitalRead(P_SW_STOP_PIN);
-
-  if (nowStart != lastStart) {
-    Serial.print("[RAW] START pin=");
-    Serial.println(nowStart);   // 0 or 1
-    lastStart = nowStart;
-  }
-  if (nowStop != lastStop) {
-    Serial.print("[RAW] STOP  pin=");
-    Serial.println(nowStop);    // 0 or 1
-    lastStop = nowStop;
-  }
-}
-//====================================================
-// [切り分け] FANピンが揺れているかを変化時だけ表示
-//====================================================
-void debug_fan_pin_on_change() {
-  static int last = -1;
-  int now = digitalRead(FAN_CTRL_PIN);
-  if (now != last) {
-    Serial.print("[RAW] FAN pin=");
-    Serial.println(now);
-    last = now;
-  }
 }
 
 // for debug:無事動いたら削除してよい

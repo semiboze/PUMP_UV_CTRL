@@ -33,13 +33,7 @@
 // ポンプ／UV 共通の状態
 // enum SystemState { STATE_STOPPED, STATE_RUNNING };
 
-// チャタリング対策付きスイッチ
-// struct Switch {
-//   const int pin;
-//   int lastReading;
-//   int stableState;
-//   unsigned long lastDebounceTime;
-// };
+
 
 // 実体はメイン .ino 側で定義する
 //extern SystemState pumpState;

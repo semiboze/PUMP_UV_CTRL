@@ -31,7 +31,7 @@ const char* FirmwareVersion = "20251225_R1";
 // ----------------------------------------------------------------
 // 固定回転数モードで動作する場合の回転数を設定します。
 const int NORMAL_MAX_RPM = 2500;        // 固定回転数モードでの最大回転数
-const int PRIMING_DURATION_SEC = 0;     // プライミングを行う時間（秒）
+const int PRIMING_DURATION_SEC = 20;     // プライミングを行う時間（秒）
 const float HOLD_DURATION_SEC = 1.0;    // 最高回転数での保持時間（秒）
 const int PRIMING_MAX_RPM      = 2500;  // プライミング中の最大回転数
 const int PRIMING_MIN_RPM      = 2000;  // プライミング中の最小回転数
@@ -124,6 +124,17 @@ struct Switch {
   int lastReading, stableState;
   unsigned long lastDebounceTime;
 };
+// チャタリング対策付きスイッチ
+// ===== 暫定：Switch が見えていない場合の応急定義 =====
+// typedef struct {
+//   uint8_t pin;
+//   bool    active_low;          // trueならLOWが押下
+//   uint16_t debounce_ms;        // チャタリング
+//   bool    last_raw;
+//   bool    stable;
+//   unsigned long last_change_ms;
+// } Switch;
+
 Switch pumpStartSwitch = {P_SW_START_PIN, HIGH, HIGH, 0};
 Switch pumpStopSwitch  = {P_SW_STOP_PIN,  HIGH, HIGH, 0};
 
@@ -345,26 +356,55 @@ void initializeDisplays() {
   tm3.clearDisplay();
 }
 
-// チャタリング防止付きスイッチ押下検出
+// チャタリング防止付きスイッチ押下検出 2026-01-08 コメント化
+// bool isButtonPressed(Switch &sw) {
+//   int currentReading = digitalRead(sw.pin);
+//   if (currentReading != sw.lastReading) {
+//     sw.lastDebounceTime = millis();
+//   }
+  
+//   if ((millis() - sw.lastDebounceTime) > DEBOUNCE_DELAY_MS) {
+//     if (currentReading != sw.stableState) {
+//       sw.stableState = currentReading;
+//       if (sw.stableState == LOW) {
+//         sw.lastReading = currentReading;
+//         return true;
+//       } 
+//     } 
+//   } 
+  
+//   sw.lastReading = currentReading;
+//   return false;
+// }
 bool isButtonPressed(Switch &sw) {
-  int currentReading = digitalRead(sw.pin);
-  if (currentReading != sw.lastReading) {
+  // INPUT_PULLUP 前提：押すと LOW
+  bool current = digitalRead(sw.pin);
+
+  // 変化があったらデバウンス開始
+  if (current != sw.lastReading) {
     sw.lastDebounceTime = millis();
   }
-  
+
+  bool pressed_event = false;
+
+  // 一定時間安定していたら「確定状態」を更新
   if ((millis() - sw.lastDebounceTime) > DEBOUNCE_DELAY_MS) {
-    if (currentReading != sw.stableState) {
-      sw.stableState = currentReading;
+    if (current != sw.stableState) {
+      sw.stableState = current;
+
+      // 押下イベントは「LOWに落ちた瞬間」だけ
       if (sw.stableState == LOW) {
-        sw.lastReading = currentReading;
-        return true;
-      } 
-    } 
-  } 
-  
-  sw.lastReading = currentReading;
-  return false;
+        pressed_event = true;
+      }
+    }
+  }
+
+  // ★最重要：毎回更新（これが無いと離した判定が永遠に終わらない）
+  sw.lastReading = current;
+
+  return pressed_event;
 }
+
 // ▼▼▼ ここから追加 ▼▼▼ 2025年9月16日 インバーターに停止コマンドを送信する関数
 /**
  * @brief インバーターに停止コマンド（回転数0）を送信する
