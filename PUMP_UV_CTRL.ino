@@ -82,13 +82,13 @@ SystemState pumpState = STATE_STOPPED;
 const int SERIAL0_BAUD_RATE    = 115200;
 const int TIMER_INTERVAL_MS   = 50;           // タイマー割り込み間隔 (ms)
 const int LED_ISR_BLINK_INTERVAL_SEC = 1;     // 1秒ごとに点滅させる。変えたければここを変える 2025年12月10日
-const int DEBOUNCE_DELAY_MS   = 50;           // スイッチのチャタリング防止時間 (ms)
+const int DEBOUNCE_DELAY_MS   = 20;           // スイッチのチャタリング防止時間 (ms)
 const unsigned long PUMP_TIMEOUT_SEC  = 60;   // 既存の過電流チェック用の時間（既存仕様を維持）
 // ★追加★ ポンプ起動時の「低電流チェック」の猶予時間
 const unsigned long PUMP_STARTUP_TIMEOUT_SEC  = 120;  // 起動後電流が閾値に到達するまでの監視タイマー秒 2025-12-09
 const int PUMP_CURRENT_THRESHOLD_DEFAULT = 512; // デフォルトのポンプ電流しきい値
 int PUMP_CURRENT_THRESHOLD      = PUMP_CURRENT_THRESHOLD_DEFAULT;  // ポンプ運転を判断する電流のしきい値
-const int COMMAND_INTERVAL_MS = 300;          // コマンド送信間隔 (ms)
+const int COMMAND_INTERVAL_MS = 100;          // コマンド送信間隔 (ms)
 // [変更点] 実行時に決定される回転数制御モードを格納する変数
 enum varControlMode { MODE_VOLUME, MODE_FIXED };
 varControlMode rpmControlMode;
