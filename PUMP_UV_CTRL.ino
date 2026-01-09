@@ -62,6 +62,7 @@ const int P_SW_START_PIN    = 2 , P_SW_STOP_PIN         = 3;
 const int P_LAMP_PIN        = 4;
 const int EM_LAMP_PIN = 8;      // 非常停止ランプ (EM_LAMP_PIN) 接続ピン
 const int T_CNT_PIN         = 9;        // ★★★ T_CNT_PINの定義をこちらに移動 ★★★
+const int INPUT_FEEDBACK_LED_PIN = 44;  // スイッチ押下中インジケータLED
 const int FAN_CTRL_PIN = 48;                // 冷却ファン制御ピン
 const int LED_PUMP_RUN_PIN  = 45, LED_PUMP_STOP_PIN     = 46; // 操作盤の稼働灯・停止灯 現在ハード未実装
 const int LED_ISR_PIN       = LED_BUILTIN, LED_SERIAL_RX_PIN     = 50;
@@ -155,6 +156,7 @@ void trim(char* str);             // 文字列の前後の空白を削除
 void sendRpmCommand(int rpm);     // 回転数コマンド送信
 void updateCurrentThreshold();    // しきい値を更新する関数のプロトタイプ宣言
 void updateTCntPin();             // ★★★ T_CNT_PINを制御する関数のプロトタイプ宣言 ★★★
+void updateInputFeedbackLed();    // スイッチ押下中LEDの更新
 void runStartupLedSequence(int);  // 起動時のLEDシーケンス
 void resetUvHourMeter();          // ★追加★ UVアワーメーターリセット関数プロトタイプ 2025年12月11日
 void both_stop_check_task();      // ★追加★★ 両方停止出力ピンの制御タスクプロトタイプ 2025年12月11日
@@ -279,6 +281,7 @@ void loop() {
   uv_loop_task(); // UV機能のループ処理を呼び出す
 
   updateTCntPin();              // ★★★ T_CNT_PINの状態を更新 ★★★
+  updateInputFeedbackLed();     // スイッチ押下中LEDの更新
   updateDisplays();             // 3桁表示のため、1000以上は999として表示
   handleSerialCommunication();  // シリアルからのコマンド受信可否によるLED点灯消灯
   handlePeriodicTasks();        // タイマー処理でトリガーされる定期処理（コマンド送信、ピーク電流測定）
@@ -309,6 +312,20 @@ void updateTCntPin() {
   }
 }
 
+// スイッチ押下中LEDの更新（押されている間だけ点灯）
+void updateInputFeedbackLed() {
+  bool isPressed = false;
+
+  if (digitalRead(P_SW_START_PIN) == LOW ||
+      digitalRead(P_SW_STOP_PIN) == LOW ||
+      digitalRead(UV_SW_START_PIN) == LOW ||
+      digitalRead(UV_SW_STOP_PIN) == LOW) {
+    isPressed = true;
+  }
+
+  digitalWrite(INPUT_FEEDBACK_LED_PIN, isPressed ? HIGH : LOW);
+}
+
 // [変更点] 電流しきい値を可変抵抗から読み取り更新する関数
 void updateCurrentThreshold() {
   if(currThresholdCntMode == MODE_FIXED) {
@@ -327,6 +344,8 @@ void updateCurrentThreshold() {
 void initializePins() {
   pinMode(P_SW_START_PIN, INPUT_PULLUP);
   pinMode(P_SW_STOP_PIN, INPUT_PULLUP);
+  pinMode(INPUT_FEEDBACK_LED_PIN, OUTPUT);
+  digitalWrite(INPUT_FEEDBACK_LED_PIN, LOW);
   pinMode(EM_LAMP_PIN, OUTPUT);
   pinMode(P_LAMP_PIN, OUTPUT);
   // pinMode(LED_PUMP_RUN_PIN, OUTPUT);
