@@ -33,13 +33,6 @@
 // ポンプ／UV 共通の状態
 // enum SystemState { STATE_STOPPED, STATE_RUNNING };
 
-
-
-// 実体はメイン .ino 側で定義する
-//extern SystemState pumpState;
-//extern Switch pumpStartSwitch;
-//extern Switch pumpStopSwitch;
-
 // メイン .ino に実装がある関数
 //bool isButtonPressed(Switch &sw);
 

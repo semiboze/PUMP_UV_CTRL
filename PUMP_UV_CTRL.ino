@@ -268,7 +268,7 @@ void setup() {
   // detectedLampsが0なら、uv_setupは何もしない
   uv_setup(detectedLamps); 
   
-  // initializeDisplays();
+  initializeDisplays();
 
   FlexiTimer2::set(TIMER_INTERVAL_MS, timerInterrupt);
   FlexiTimer2::start();
@@ -283,16 +283,12 @@ void loop() {
   updateCurrentThreshold();     // [変更点] 毎ループ、可変抵抗の値を読み込んでしきい値を更新
   handleSwitchInputs();         // スイッチ入力処理
   updateSystemState();          // ポンプの状態更新
-
-  uv_loop_task(); // UV機能のループ処理を呼び出す
-
+  uv_loop_task();               // UV機能のループ処理を呼び出す
   updateTCntPin();              // ★★★ T_CNT_PINの状態を更新 ★★★
   updateDisplays();             // 3桁表示のため、1000以上は999として表示
   handleSerialCommunication();  // シリアルからのコマンド受信可否によるLED点灯消灯
   handlePeriodicTasks();        // タイマー処理でトリガーされる定期処理（コマンド送信、ピーク電流測定）
-
   both_stop_check_task();       // ★追加★★ 両方停止出力ピンの制御タスク
-
   // debug_print_raw_buttons_on_change(); // デバッグ用：スイッチの状態変化を生ログ出力
   // debug_fan_pin_on_change();
   updateInputFeedbackLed();     // スイッチ押下中LEDの更新
@@ -988,7 +984,7 @@ void measurePeakCurrent() {
   ledBlinkCnt++;
   if (ledBlinkCnt >= (LED_ISR_BLINK_INTERVAL_SEC * 1000 / TIMER_INTERVAL_MS)) {
     ledBlinkCnt = 0;
-    digitalWrite(LED_ISR_PIN, !digitalRead(LED_ISR_PIN));
+    // digitalWrite(LED_ISR_PIN, !digitalRead(LED_ISR_PIN));
   }
   // --- 移動平均フィルタの計算 ---
   // 1. 合計から一番古い測定値を引く
