@@ -19,8 +19,13 @@
  * [注意]ピン42, 43, A3～A7はプルアップ抵抗内蔵のINPUT_PULLUPモードで使用してください。
  */
 #define DEBUG_MODE          // デバッグ用シリアル出力を有効にする場合はコメントアウトを外す
-// #define UV_DEBUG_MODE       // UV装置制御関連のデバッグ
+#define UV_DEBUG_MODE       // UV装置制御関連のデバッグ
 #define PU_DEBUG_MODE       // ポンプ制御関連のデバッグ
+
+/*  ポンプ起動後電流が閾値に到達するまでの監視タイマー(秒)
+    ポンプと水槽の距離によって変動させる必要があるが最大長さに合わせておくのもあり*/
+#define DEFINE_CURRENT_STATUS 10 
+
 //====================================================
 // [追加] RPM送信ごとのログを出すか（流れるので通常は0推奨）
 //====================================================
@@ -86,7 +91,7 @@ const int LED_ISR_BLINK_INTERVAL_SEC = 1;     // 1秒ごとに点滅させる。
 const int DEBOUNCE_DELAY_MS   = 50;           // スイッチのチャタリング防止時間 (ms)
 const unsigned long PUMP_TIMEOUT_SEC  = 60;   // 既存の過電流チェック用の時間（既存仕様を維持）
 // ★追加★ ポンプ起動時の「低電流チェック」の猶予時間
-const unsigned long PUMP_STARTUP_TIMEOUT_SEC  = 10;  // 起動後電流が閾値に到達するまでの監視タイマー秒 2025-12-09
+const unsigned long PUMP_STARTUP_TIMEOUT_SEC  = DEFINE_CURRENT_STATUS;  // 起動後電流が閾値に到達するまでの監視タイマー秒 2025-12-09
 const int PUMP_CURRENT_THRESHOLD_DEFAULT = 512; // デフォルトのポンプ電流しきい値
 int PUMP_CURRENT_THRESHOLD      = PUMP_CURRENT_THRESHOLD_DEFAULT;  // ポンプ運転を判断する電流のしきい値
 const int COMMAND_INTERVAL_MS = 300;          // コマンド送信間隔 (ms)
