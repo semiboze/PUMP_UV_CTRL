@@ -48,7 +48,7 @@ const int LED_UV_RUN_PIN    = 47; // 操作盤の稼働灯
 const int UV_IN_12_PIN      = 11; // UVランプ12基目の断線警告ピン
 const int UV_IN_13_PIN      = 18; // UVランプ13基目の断線警告ピン
 const int UV_IN_14_PIN      = 19; // UVランプ14基目の断線警告ピン
-const int UV_IN_15_PIN      = 44; // UVランプ15基目の断線警告ピン
+const int UV_IN_15_PIN      = ; // UVランプ15基目の断線警告ピン
 const int UV_IN_16_PIN      = 59; // UVランプ16基目の断線警告ピン */
 
 /* const int UV_OUT_11_PIN     = 51; // UVランプ11基目のパイロットランプ出力ピン
@@ -225,15 +225,11 @@ void uv_setup(int detected_lamp_count) {
   pinMode(UV_SW_START_PIN, INPUT_PULLUP);
   pinMode(UV_SW_STOP_PIN, INPUT_PULLUP);
   pinMode(UV_LAMP_PIN, OUTPUT);
-  // pinMode(T_CNT_PIN, OUTPUT);
-  // for(int i = 0; i < NUM_UV_LAMPS; i++) {
-  //   pinMode(uvInPins[i], INPUT);
-  //   pinMode(uvOutPins[i], OUTPUT);
-  // } 
-  pinMode(UV_GROUP_A_PIN, OUTPUT);
-  pinMode(UV_GROUP_B_PIN, OUTPUT);
+
   // --- UVグループは必ずOFFで立ち上げる（グリッチ防止）---
   // 先に出力ラッチをOFF側へ（INPUT状態でもpull-up的に働くことがある）
+  pinMode(UV_GROUP_A_PIN, OUTPUT);
+  pinMode(UV_GROUP_B_PIN, OUTPUT);
   digitalWrite(UV_GROUP_A_PIN, RELAY_OFF);
   digitalWrite(UV_GROUP_B_PIN, RELAY_OFF);
   pinMode(LED_UV_RUN_PIN, OUTPUT);
@@ -274,7 +270,14 @@ bool is_uv_running() {
  */
 void runStartupLedSequence(int lampCount) {
   const int staticLEDs[] = {EM_LAMP_PIN, P_LAMP_PIN, LED_PUMP_RUN_PIN, LED_PUMP_STOP_PIN, UV_LAMP_PIN, LED_UV_RUN_PIN /*, LED_UV_STOP_PIN*/ };
-  const char* staticLEDNames[] = {"EM_LAMP_PIN      ", "P_LAMP_PIN       ", "LED_PUMP_RUN_PIN ", "LED_PUMP_STOP_PIN", "UV_LAMP_PIN      ", "LED_UV_RUN_PIN   " /*, "LED_UV_STOP_PIN  "*/};
+  const char* staticLEDNames[] = {
+    "EM_LAMP_PIN      ", 
+    "P_LAMP_PIN       ", 
+    "LED_PUMP_RUN_PIN ", 
+    "LED_PUMP_STOP_PIN", 
+    "UV_LAMP_PIN      ", 
+    "LED_UV_RUN_PIN   " /*, 
+    "LED_UV_STOP_PIN  " */};
   const int numStaticLEDs = sizeof(staticLEDs) / sizeof(staticLEDs[0]);
   const int main_interval = 500;  // 固定LEDの点灯/消灯の間隔 (ミリ秒)
   const int sweep_interval = 80;  // UVランプを流れるように点灯させる間隔 (ミリ秒)
@@ -286,13 +289,13 @@ void runStartupLedSequence(int lampCount) {
   for(int i = 0; i < numStaticLEDs; i++) {
     digitalWrite(staticLEDs[i], HIGH);
     delay(1);
-    //UV_DEBUG_PRINTLN(String(staticLEDNames[i]) + " ON");
+    UV_DEBUG_PRINTLN(String(staticLEDNames[i]) + " ON");
   }
   delay(main_interval);  
   for(int i = 0; i < numStaticLEDs; i++) {
     digitalWrite(staticLEDs[i], LOW);
     delay(1);
-    //UV_DEBUG_PRINTLN(String(staticLEDNames[i]) + " OFF");
+    UV_DEBUG_PRINTLN(String(staticLEDNames[i]) + " OFF");
   }
 
   // 2. 検出したUVランプを流れるように点灯 (スイープON)
@@ -301,7 +304,7 @@ void runStartupLedSequence(int lampCount) {
       digitalWrite(uvOutPins[i], HIGH);
       delay(sweep_interval);
     }
-    delay(main_interval); // 全点灯後に少し間を空ける
+    delay(50); // 全点灯後に少し間を空ける
 
     // 3. 検出したUVランプを流れるように消灯 (スイープOFF)
     for(int i = 0; i < lampCount; i++) {
@@ -310,27 +313,28 @@ void runStartupLedSequence(int lampCount) {
     }
   }
 
-  delay(main_interval / 2); // 少し間を空ける
+  // delay(main_interval / 2); // 少し間を空ける
 
-  // 4. 全てのLEDを同時に点灯・消灯
-  for(int i = 0; i < numStaticLEDs; i++) {
-    digitalWrite(staticLEDs[i], HIGH);
-    delay(1);
-  }
-  for(int i = 0; i < lampCount; i++) {
-    digitalWrite(uvOutPins[i], HIGH);
-    delay(1);
-  }
-  delay(main_interval);
+  for(int j = 0; j < 2; j++) {
+    // 4. 全てのLEDを同時に点灯・消灯を2回
+    for(int i = 0; i < numStaticLEDs; i++) { // 制御ランプ点灯
+      digitalWrite(staticLEDs[i], HIGH);
+      delay(1);
+    }
+    for(int i = 0; i < lampCount; i++) {  // UVランプ点灯
+      digitalWrite(uvOutPins[i], HIGH);
+      delay(1);
+    }
+    delay(50);
 
-  for(int i = 0; i < numStaticLEDs; i++) {
-    digitalWrite(staticLEDs[i], LOW);
-    delay(1);
+    for(int i = 0; i < numStaticLEDs; i++) { // 制御ランプ消灯
+      digitalWrite(staticLEDs[i], LOW);
+      delay(1);
+    }
+    for(int i = 0; i < lampCount; i++) { // UVランプ消灯
+      digitalWrite(uvOutPins[i], LOW);
+      delay(1);
+    }
   }
-  for(int i = 0; i < lampCount; i++) {
-    digitalWrite(uvOutPins[i], LOW);
-    delay(1);
-  }
-
   UV_DEBUG_PRINTLN("LED self-check sequence complete.");
 }

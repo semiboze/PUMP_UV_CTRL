@@ -31,7 +31,7 @@ const char* FirmwareVersion = "20251225_R1";
 // ----------------------------------------------------------------
 // 固定回転数モードで動作する場合の回転数を設定します。
 const int NORMAL_MAX_RPM = 2500;        // 固定回転数モードでの最大回転数
-const int PRIMING_DURATION_SEC = 20;     // プライミングを行う時間（秒）
+const int PRIMING_DURATION_SEC = 0;     // プライミングを行う時間（秒）
 const float HOLD_DURATION_SEC = 1.0;    // 最高回転数での保持時間（秒）
 const int PRIMING_MAX_RPM      = 2500;  // プライミング中の最大回転数
 const int PRIMING_MIN_RPM      = 2000;  // プライミング中の最小回転数
@@ -62,8 +62,9 @@ const int P_SW_START_PIN    = 2 , P_SW_STOP_PIN         = 3;
 const int P_LAMP_PIN        = 4;
 const int EM_LAMP_PIN = 8;      // 非常停止ランプ (EM_LAMP_PIN) 接続ピン
 const int T_CNT_PIN         = 9;        // ★★★ T_CNT_PINの定義をこちらに移動 ★★★
-const int FAN_CTRL_PIN = 48;                // 冷却ファン制御ピン
+const int INPUT_FEEDBACK_LED_PIN = 44;  // スイッチ押下中インジケータLED
 const int LED_PUMP_RUN_PIN  = 45, LED_PUMP_STOP_PIN     = 46; // 操作盤の稼働灯・停止灯 現在ハード未実装
+const int FAN_CTRL_PIN = 48;                // 冷却ファン制御ピン
 const int LED_ISR_PIN       = LED_BUILTIN, LED_SERIAL_RX_PIN     = 50;
 const int RPM_ANALOG_IN_PIN = A0 ;       // 回転数調整ダイヤル可変抵抗 (ポテンショメーター) 接続ピン
 const int CURRENT_ANALOG_IN_PIN = A1;    // ポンプの電流センサー接続ピン
@@ -85,7 +86,7 @@ const int LED_ISR_BLINK_INTERVAL_SEC = 1;     // 1秒ごとに点滅させる。
 const int DEBOUNCE_DELAY_MS   = 50;           // スイッチのチャタリング防止時間 (ms)
 const unsigned long PUMP_TIMEOUT_SEC  = 60;   // 既存の過電流チェック用の時間（既存仕様を維持）
 // ★追加★ ポンプ起動時の「低電流チェック」の猶予時間
-const unsigned long PUMP_STARTUP_TIMEOUT_SEC  = 120;  // 起動後電流が閾値に到達するまでの監視タイマー秒 2025-12-09
+const unsigned long PUMP_STARTUP_TIMEOUT_SEC  = 10;  // 起動後電流が閾値に到達するまでの監視タイマー秒 2025-12-09
 const int PUMP_CURRENT_THRESHOLD_DEFAULT = 512; // デフォルトのポンプ電流しきい値
 int PUMP_CURRENT_THRESHOLD      = PUMP_CURRENT_THRESHOLD_DEFAULT;  // ポンプ運転を判断する電流のしきい値
 const int COMMAND_INTERVAL_MS = 300;          // コマンド送信間隔 (ms)
@@ -152,6 +153,7 @@ void measurePeakCurrent();        // ポンプのピーク電流を測定
 int getTargetRpm();               // 目標回転数を取得
 int calculateRpmFromVolume();     // 可変抵抗から回転数を計算
 void trim(char* str);             // 文字列の前後の空白を削除
+void sendRpmCommand(int rpm);     // 回転数コマンド送信 2026-01-08 変更
 void updateCurrentThreshold();    // しきい値を更新する関数のプロトタイプ宣言
 void updateTCntPin();             // ★★★ T_CNT_PINを制御する関数のプロトタイプ宣言 ★★★
 void runStartupLedSequence(int);  // 起動時のLEDシーケンス
@@ -188,11 +190,11 @@ void setup() {
   //--- ポンプ通信用（インバーター） ---
   PUMP_SERIAL.begin(2400);       // ← いまインバーターに合わせている速度にする
   DEBUG_PRINTLN("--- System Start ---");
-  // ★追加★ 確認コマンドを最低1回送る（仕様書要求）:contentReference[oaicite:11]{index=11}
+  // ★追加★ 確認コマンドを最低1回送る（仕様書要求）
   // ここでは3回だけ軽くリトライ（応答処理は後述の受信側でconfirmedにする）
   for (int i = 0; i < 3; i++) {
     sendConfirmCommand();
-    delay(120);  // 応答時間0～100msの記載があるので少し待つ:contentReference[oaicite:12]{index=12}
+    delay(60);  // 応答時間0～100msの記載があるので少し待つ
   }
 
   // [変更点] 起動時にハードウェア設定を読み込み、RPM制御モードを決定
@@ -209,6 +211,8 @@ void setup() {
 
   pinMode(HOURMETER_RESET_PIN, OUTPUT);   // ★追加★★ 両方停止出力ピン 初期化
   digitalWrite(HOURMETER_RESET_PIN, LOW); // ★追加★★ 初期状態はLOW
+  pinMode(INPUT_FEEDBACK_LED_PIN, OUTPUT);    // スイッチ押下中インジケータLEDピン初期化
+  digitalWrite(INPUT_FEEDBACK_LED_PIN, LOW);  // 初期状態は消灯
 
   // 4つのピンの状態を読み取り、2進数としてランプ数を計算
   detectedLamps = 0; // 0に初期化
@@ -259,7 +263,7 @@ void setup() {
   // detectedLampsが0なら、uv_setupは何もしない
   uv_setup(detectedLamps); 
   
-  initializeDisplays();
+  // initializeDisplays();
 
   FlexiTimer2::set(TIMER_INTERVAL_MS, timerInterrupt);
   FlexiTimer2::start();
@@ -286,7 +290,7 @@ void loop() {
 
   // debug_print_raw_buttons_on_change(); // デバッグ用：スイッチの状態変化を生ログ出力
   // debug_fan_pin_on_change();
-
+  updateInputFeedbackLed();     // スイッチ押下中LEDの更新
 }
 
 // ================================================================
@@ -420,6 +424,25 @@ void sendStopCommand() {
   PU_DEBUG_PRINTLN("Sent: Stop Command to Inverter");
 }
 // ▲▲▲ ここまで追加 ▲▲▲
+// 回転数コマンド送信（ポンプ起動時や定期送信で使用）
+void sendRpmCommand(int rpm) {
+  double analog_value_f = (rpm + 5.092) / 17.945;
+  if (analog_value_f > 139.6) analog_value_f = 139.6;
+  if (analog_value_f < 34.0) analog_value_f = 34.0;
+  byte analog_value = (byte)analog_value_f;
+
+  // ★重要★ 継続運転なら D5=0xFF を推奨（運転継続側）
+  byte command[8] = {0x00, 0x01, 0x10, 0x02, analog_value, 0xFF, 0x00, 0x00};
+
+  byte sum = 0;
+  for(int i = 0; i < 7; i++) { sum += command[i]; }
+  command[7] = 0x55 - sum;
+  pump_write8(command, "RPM"); // インバーターへ回転数コマンド送信
+#if DEBUG_RPM_EACH_SEND
+  PU_DEBUG_PRINT("Sent: Set RPM Command to Inverter - RPM=");
+  PU_DEBUG_PRINTLN(rpm);
+#endif
+}
 
 // ============================================================
 // ★追加★ 固定コード確認コマンド(0x00) 送信
@@ -445,9 +468,9 @@ void pump_write9(const uint8_t cmd[9], const char* label) {
   PU_DEBUG_PRINTLN();
 }
 
-// チェックサム：D0～D8の総和が0x55になるようにする:contentReference[oaicite:8]{index=8}
+// チェックサム：D0～D8の総和が0x55になるようにする
 void sendConfirmCommand() {
-  // 仕様書の例そのまま（最後はchecksum=0x38）:contentReference[oaicite:9]{index=9}
+  // 仕様書の例そのまま（最後はchecksum=0x38）
   uint8_t cmd[9] = {0x00, 0x01, 0x00, 0x03, 0x01, 0x12, 0x00, 0x06, 0x00};
 
   uint8_t sum = 0;
@@ -516,6 +539,12 @@ void handleSwitchInputs() {
       //====================================================
       pumpState = STATE_RUNNING;
       pumpStartTime = millis();
+
+      //====================================================
+      // [改善] 体感レスポンス向上のため、起動直後に回転数コマンドを即送信
+      //====================================================
+      rpm_value = getTargetRpm();
+      sendRpmCommand(rpm_value);
     }
   }
   // ポンプストップボタン
@@ -887,24 +916,25 @@ void handlePeriodicTasks() {
   if (commandTimerCount >= (COMMAND_INTERVAL_MS / TIMER_INTERVAL_MS)) {
     commandTimerCount = 0;
     if (pumpState == STATE_RUNNING) {
-      double analog_value_f = (rpm_value + 5.092) / 17.945;
-      if (analog_value_f > 139.6) analog_value_f = 139.6;
-      if (analog_value_f < 34.0) analog_value_f = 34.0;
-      byte analog_value = (byte)analog_value_f;
+//       double analog_value_f = (rpm_value + 5.092) / 17.945;
+//       if (analog_value_f > 139.6) analog_value_f = 139.6;
+//       if (analog_value_f < 34.0) analog_value_f = 34.0;
+//       byte analog_value = (byte)analog_value_f;
 
-      // byte command[8] = {0x00, 0x01, 0x10, 0x02, analog_value, 0x01, 0x00, 0x00};
-      // ★重要★ 継続運転なら D5=0xFF を推奨（運転継続側）
-      // 仕様の細部はPDFの「周波数変更時間」や継続運転の注記に従う:contentReference[oaicite:14]{index=14}
-      byte command[8] = {0x00, 0x01, 0x10, 0x02, analog_value, 0xFF, 0x00, 0x00};
+//       // byte command[8] = {0x00, 0x01, 0x10, 0x02, analog_value, 0x01, 0x00, 0x00};
+//       // ★重要★ 継続運転なら D5=0xFF を推奨（運転継続側）
+//       // 仕様の細部はPDFの「周波数変更時間」や継続運転の注記に従う:contentReference[oaicite:14]{index=14}
+//       byte command[8] = {0x00, 0x01, 0x10, 0x02, analog_value, 0xFF, 0x00, 0x00};
 
-      byte sum = 0;
-      for(int i=0; i < 7; i++) { sum += command[i]; }
-      command[7] = 0x55 - sum;
-      pump_write8(command, "RPM"); // インバーターへ回転数コマンド送信
-#if DEBUG_RPM_EACH_SEND
-      PU_DEBUG_PRINT("Sent: Set RPM Command to Inverter - RPM=");
-      PU_DEBUG_PRINTLN(rpm_value);
-#endif    
+//       byte sum = 0;
+//       for(int i=0; i < 7; i++) { sum += command[i]; }
+//       command[7] = 0x55 - sum;
+//       pump_write8(command, "RPM"); // インバーターへ回転数コマンド送信
+// #if DEBUG_RPM_EACH_SEND
+//       PU_DEBUG_PRINT("Sent: Set RPM Command to Inverter - RPM=");
+//       PU_DEBUG_PRINTLN(rpm_value);
+// #endif    
+      sendRpmCommand(rpm_value);
     }else{
       // // ポンプ停止中は回転数0のコマンドを送信する
       // byte stop_command[8] = {0x00, 0x01, 0x10, 0x02, 0x00, 0x01, 0x00, 0x00};
@@ -1304,4 +1334,16 @@ const char* motor_err_str(uint8_t code) {
     case 0x0E: return "IPM温度異常";
     default:   return "不明(仕様外)";
   }
+}
+void updateInputFeedbackLed() { // ★追加★ 入力フィードバックLED制御タスク
+  bool isPressed = false;
+
+  if (digitalRead(P_SW_START_PIN) == LOW ||
+      digitalRead(P_SW_STOP_PIN) == LOW ||
+      digitalRead(UV_SW_START_PIN) == LOW ||
+      digitalRead(UV_SW_STOP_PIN) == LOW) {
+    isPressed = true;
+  }
+
+  digitalWrite(INPUT_FEEDBACK_LED_PIN, isPressed ? HIGH : LOW);
 }
