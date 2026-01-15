@@ -40,7 +40,7 @@ const int UV_OUT_9_PIN      = 38; // UVランプ9基目のパイロットラン�
 const int UV_OUT_10_PIN     = 39; // UVランプ10基目のパイロットランプ出力ピン
 const int UV_GROUP_A_PIN    = 40; // UVランプグループA制御ピン
 const int UV_GROUP_B_PIN    = 41; // UVランプグループB制御ピン
-const int LED_UV_RUN_PIN    = 47; // 操作盤の稼働灯
+const int LED_UV_RUN_PIN    = 47; // 操作盤の稼働灯(現在ハード未実装)
 // const int LED_UV_STOP_PIN   = 48; //操作盤の稼働灯・停止灯
 // --- ここから追加 (11〜15本目) ---
 // 注意：これらのピン番号は仮のものです。ご自身のArduino Megaの空きピンに合わせて再割り当てしてください。
@@ -144,20 +144,22 @@ void checkUvLampConnection() {
 
   // --- 共通のデバッグ出力 --- 2025年12月10日
   static unsigned long lastDebugPrintTime = 0;
-if (millis() - lastDebugPrintTime > 10000) {
-  lastDebugPrintTime = millis();
-  UV_DEBUG_PRINT("UV Lamps Status ");
-  for (int i = 0; i < numActiveUvLamps; i++) {
-    int val = digitalRead(uvInPins[i]);
+  if (millis() - lastDebugPrintTime > 10000) {
+    lastDebugPrintTime = millis();
+    UV_DEBUG_PRINT("UV LANP (state=");
+    UV_DEBUG_PRINT(uvLampState == STATE_RUNNING ? "RUNNING" : "STOPPED");
+    UV_DEBUG_PRINTLN(")");
+    UV_DEBUG_PRINT("UV Lamps Status ");
+    for (int i = 0; i < numActiveUvLamps; i++) {
+      int val = digitalRead(uvInPins[i]);
 
-    // 1(HIGH) → "NONE", 0(LOW) → "NORMAL"
-    const char* status = (val == HIGH) ? "NONE" : "NORMAL";
+      // 1(HIGH) → "NONE", 0(LOW) → "NORMAL"
+      const char* status = (val == HIGH) ? "NONE" : "NORMAL";
 
-    UV_DEBUG_PRINT(i + 1);    UV_DEBUG_PRINT(":");    UV_DEBUG_PRINT(status);    UV_DEBUG_PRINT(", ");
+      UV_DEBUG_PRINT(i + 1);    UV_DEBUG_PRINT(":");    UV_DEBUG_PRINT(status);    UV_DEBUG_PRINT(", ");
+    }
+    UV_DEBUG_PRINTLN("");
   }
-  UV_DEBUG_PRINTLN("");
-}
-
 }
 
 // UVランプのスイッチ入力処理
@@ -187,16 +189,11 @@ void updateUvSystemState() {
     digitalWrite(UV_LAMP_PIN, HIGH);
     // digitalWrite(T_CNT_PIN, HIGH);
     digitalWrite(UV_GROUP_A_PIN, RELAY_ON);// リレーはLOWアクティブだった2025-11-21
-    digitalWrite(UV_GROUP_B_PIN, RELAY_OFF);
-    digitalWrite(LED_UV_RUN_PIN, HIGH);
-    // digitalWrite(LED_UV_STOP_PIN, LOW);
+    digitalWrite(UV_GROUP_B_PIN, RELAY_ON);
   } else {
     digitalWrite(UV_LAMP_PIN, LOW);
-    // digitalWrite(T_CNT_PIN, LOW);
     digitalWrite(UV_GROUP_A_PIN, RELAY_OFF);
     digitalWrite(UV_GROUP_B_PIN, RELAY_OFF);
-    digitalWrite(LED_UV_RUN_PIN, LOW);
-    // digitalWrite(LED_UV_STOP_PIN, HIGH);
   }
   if (pumpState == STATE_STOPPED || uvLampState == STATE_RUNNING) {
       // uvLampState = STATE_STOPPED;
@@ -232,7 +229,7 @@ void uv_setup(int detected_lamp_count) {
   pinMode(UV_GROUP_B_PIN, OUTPUT);
   digitalWrite(UV_GROUP_A_PIN, RELAY_OFF);
   digitalWrite(UV_GROUP_B_PIN, RELAY_OFF);
-  pinMode(LED_UV_RUN_PIN, OUTPUT);
+  // pinMode(LED_UV_RUN_PIN, OUTPUT);
   // pinMode(LED_UV_STOP_PIN, OUTPUT);
   // digitalWrite(LED_UV_STOP_PIN, HIGH);
 }
@@ -269,15 +266,25 @@ bool is_uv_running() {
  * @param lampCount メインファイルで検出されたランプの数
  */
 void runStartupLedSequence(int lampCount) {
-  const int staticLEDs[] = {EM_LAMP_PIN, P_LAMP_PIN, LED_PUMP_RUN_PIN, LED_PUMP_STOP_PIN, UV_LAMP_PIN, LED_UV_RUN_PIN /*, LED_UV_STOP_PIN*/ };
+  const int staticLEDs[] = {
+    EM_LAMP_PIN, 
+    P_LAMP_PIN, 
+    // LED_PUMP_RUN_PIN, 
+    // LED_PUMP_STOP_PIN, 
+    UV_LAMP_PIN
+    // LED_UV_RUN_PIN , 
+    // LED_UV_STOP_PIN
+   };
+
   const char* staticLEDNames[] = {
     "EM_LAMP_PIN      ", 
     "P_LAMP_PIN       ", 
-    "LED_PUMP_RUN_PIN ", 
-    "LED_PUMP_STOP_PIN", 
-    "UV_LAMP_PIN      ", 
-    "LED_UV_RUN_PIN   " /*, 
-    "LED_UV_STOP_PIN  " */};
+    // "LED_PUMP_RUN_PIN ", 
+    // "LED_PUMP_STOP_PIN", 
+    "UV_LAMP_PIN      "
+    // "LED_UV_RUN_PIN   " , 
+    // "LED_UV_STOP_PIN  " 
+  };
   const int numStaticLEDs = sizeof(staticLEDs) / sizeof(staticLEDs[0]);
   const int main_interval = 500;  // 固定LEDの点灯/消灯の間隔 (ミリ秒)
   const int sweep_interval = 80;  // UVランプを流れるように点灯させる間隔 (ミリ秒)
