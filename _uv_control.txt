@@ -407,8 +407,8 @@ void runStartupLedSequence(int lampCount) {
     "UV_LAMP_PIN      "
   };
   const int numStaticLEDs = sizeof(staticLEDs) / sizeof(staticLEDs[0]);
-  const int main_interval = 1000;  // 固定LEDの点灯/消灯の間隔 (ミリ秒)
-  const int sweep_interval = 500;  // UVランプを流れるように点灯させる間隔 (ミリ秒)
+  const int main_interval = 1500;  // 固定LEDの点灯/消灯の間隔 (ミリ秒)
+  const int sweep_interval = 1000;  // UVランプを流れるように点灯させる間隔 (ミリ秒)
   const int Sequence_interval = 100; // シーケンス開始前の待機時間 (ミリ秒)
 
   // --- シーケンス開始 ---
@@ -434,15 +434,15 @@ void runStartupLedSequence(int lampCount) {
       delay(sweep_interval);
       digitalWrite(uvOutPins[i], LOW);
     }
-    delay(500); // 全消灯後に少し間を空ける
+    delay(main_interval); // 全消灯後に少し間を空ける
 
     // 3. 検出したUVランプを流れるように点灯と消灯
     for(int i = 0; i < lampCount; i++) {
       digitalWrite(uvOutPins[i], HIGH);
       delay(sweep_interval);
     }
-    delay(500);
-    for(int i = lampCount - 1; i >= 0; i--) {
+    delay(main_interval);
+    for(int i = 0; i < lampCount; i++) {
       digitalWrite(uvOutPins[i], LOW);
       delay(sweep_interval);
     }
@@ -454,21 +454,21 @@ void runStartupLedSequence(int lampCount) {
     // 4. 全てのLEDを同時に点灯・消灯をj回
     for(int i = 0; i < numStaticLEDs; i++) { // 制御ランプ点灯
       digitalWrite(staticLEDs[i], HIGH);
-      delay(1);
+      delay(Sequence_interval);
     }
     for(int i = 0; i < lampCount; i++) {  // UVランプ点灯
       digitalWrite(uvOutPins[i], HIGH);
-      delay(1);
+      delay(Sequence_interval);
     }
-    delay(main_interval);
+    delay(50);
 
     for(int i = 0; i < numStaticLEDs; i++) { // 制御ランプ消灯
       digitalWrite(staticLEDs[i], LOW);
-      delay(1);
+      delay(Sequence_interval);
     }
     for(int i = 0; i < lampCount; i++) { // UVランプ消灯
       digitalWrite(uvOutPins[i], LOW);
-      delay(1);
+      delay(Sequence_interval);
     }
   }
   UV_DEBUG_PRINTLN("LED self-check sequence complete.");

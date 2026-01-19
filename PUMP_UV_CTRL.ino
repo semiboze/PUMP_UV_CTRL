@@ -19,8 +19,8 @@
  * [注意]ピン42, 43, A3～A7はプルアップ抵抗内蔵のINPUT_PULLUPモードで使用してください。
  */
 #define DEBUG_MODE          // デバッグ用シリアル出力を有効にする場合はコメントアウトを外す
-// #define UV_DEBUG_MODE       // UV装置制御関連のデバッグ
-#define PU_DEBUG_MODE       // ポンプ制御関連のデバッグ
+#define UV_DEBUG_MODE       // UV装置制御関連のデバッグ
+// #define PU_DEBUG_MODE       // ポンプ制御関連のデバッグ
 
 /*  ポンプ起動後電流が閾値に到達するまでの監視タイマー(秒)
     ポンプと水槽の距離によって変動させる必要があるが最大長さに合わせておくのもあり*/
@@ -46,12 +46,7 @@
 //====================================================
 #define FORCE_RUN_NO_STOP  1
 
-
-//====================================================
-// [追加] RPM送信ごとのログを出すか（流れるので通常は0推奨）
-//====================================================
-#define DEBUG_RPM_EACH_SEND 0
-const char* FirmwareVersion = "20251225_R1";
+const char* FirmwareVersion = "20260119_R1";
 // ----------------------------------------------------------------
 // ▼▼▼ 動作設定 ▼▼▼
 // ----------------------------------------------------------------
@@ -106,6 +101,16 @@ const int UV_DETECT_BIT3_PIN = A6; // 8加算 (2^3)
 // ----------------------------------------------------------------
 enum SystemState { STATE_STOPPED, STATE_RUNNING };
 SystemState pumpState = STATE_STOPPED;
+//====================================================
+// [追加] ポンプ「運転指令」フラグ
+//  - インバータに「回せ」と命令している間 true
+//  - 状態変数pumpStateがズレてもアワメータは回すため
+//====================================================
+volatile bool pumpRunCommandActive = false;
+
+// 最後にRPMコマンドを送った時刻（ウォッチドッグ用）
+volatile unsigned long lastRpmCommandMs = 0;
+
 const int SERIAL0_BAUD_RATE    = 2400;
 const int TIMER_INTERVAL_MS   = 50;           // タイマー割り込み間隔 (ms)
 const int LED_ISR_BLINK_INTERVAL_SEC = 1;     // 1秒ごとに点滅させる。変えたければここを変える 2025年12月10日
@@ -397,18 +402,26 @@ void loop() {
 
 // ★★★ T_CNT_PINの出力を制御する新設関数 ★★★
 void updateTCntPin() {
-  bool isPumpRunning = (pumpState == STATE_RUNNING);
-  bool isUvRunning = false;
 
-  isUvRunning = is_uv_running(); // UV制御モジュールから状態を取得
+  //====================================================
+  // [改善] アワーメーターは「状態」ではなく「運転指令」で回す
+  //====================================================
+  bool isUvRunning = is_uv_running();
 
+  // RPMコマンドが一定時間来ていないなら落とす（安全側）
+  // ※継続送信間隔が300msなので、3秒以上来ないなら異常とみなす例
+  const unsigned long RPM_WATCHDOG_MS = 3000;
+  if (pumpRunCommandActive && (millis() - lastRpmCommandMs > RPM_WATCHDOG_MS)) {
+    pumpRunCommandActive = false;
+  }
 
-  if (isPumpRunning || isUvRunning) {
+  if (pumpRunCommandActive || isUvRunning) {
     digitalWrite(T_CNT_PIN, HIGH);
   } else {
     digitalWrite(T_CNT_PIN, LOW);
   }
 }
+
 
 // [変更点] 電流しきい値を可変抵抗から読み取り更新する関数
 void updateCurrentThreshold() {
@@ -536,10 +549,13 @@ void sendRpmCommand(int rpm) {
   for(int i = 0; i < 7; i++) { sum += command[i]; }
   command[7] = 0x55 - sum;
   pump_write8(command, "RPM"); // インバーターへ回転数コマンド送信
-#if DEBUG_RPM_EACH_SEND
-  PU_DEBUG_PRINT("Sent: Set RPM Command to Inverter - RPM=");
-  PU_DEBUG_PRINTLN(rpm);
-#endif
+  //====================================================
+  // [追加] RPM命令を送った＝運転指令中
+  //====================================================
+  if (rpm > 0) {
+    pumpRunCommandActive = true;
+    lastRpmCommandMs = millis();
+  }
 }
 
 // ============================================================
@@ -601,7 +617,11 @@ void stopPump() {
   // [重要] 「ポンプ未接続」や「状態ズレ」でも確実に表示を落とす
   //====================================================
   pumpState = STATE_STOPPED;
-
+  //====================================================
+  // [追加] 停止命令＝運転指令を落とす
+  //====================================================
+  pumpRunCommandActive = false;
+  lastRpmCommandMs = 0;
   //--- 稼働ランプOFF ---
   digitalWrite(P_LAMP_PIN, LOW);
   fan_off();
@@ -910,24 +930,6 @@ void handlePeriodicTasks() {
   if (commandTimerCount >= (COMMAND_INTERVAL_MS / TIMER_INTERVAL_MS)) {
     commandTimerCount = 0;
     if (pumpState == STATE_RUNNING) {
-//       double analog_value_f = (rpm_value + 5.092) / 17.945;
-//       if (analog_value_f > 139.6) analog_value_f = 139.6;
-//       if (analog_value_f < 34.0) analog_value_f = 34.0;
-//       byte analog_value = (byte)analog_value_f;
-
-//       // byte command[8] = {0x00, 0x01, 0x10, 0x02, analog_value, 0x01, 0x00, 0x00};
-//       // ★重要★ 継続運転なら D5=0xFF を推奨（運転継続側）
-//       // 仕様の細部はPDFの「周波数変更時間」や継続運転の注記に従う:contentReference[oaicite:14]{index=14}
-//       byte command[8] = {0x00, 0x01, 0x10, 0x02, analog_value, 0xFF, 0x00, 0x00};
-
-//       byte sum = 0;
-//       for(int i=0; i < 7; i++) { sum += command[i]; }
-//       command[7] = 0x55 - sum;
-//       pump_write8(command, "RPM"); // インバーターへ回転数コマンド送信
-// #if DEBUG_RPM_EACH_SEND
-//       PU_DEBUG_PRINT("Sent: Set RPM Command to Inverter - RPM=");
-//       PU_DEBUG_PRINTLN(rpm_value);
-// #endif    
       sendRpmCommand(rpm_value);
     }else{
       // // ポンプ停止中は回転数0のコマンドを送信する
@@ -1427,38 +1429,6 @@ void resetUvHourMeter() {
   digitalWrite(HOURMETER_RESET_PIN, LOW);
 }
 //====================================================
-// [追加] 8バイト固定の送信を統一（デバッグログもここに集約）
-//====================================================
-// void pump_write8(const uint8_t cmd[8], const char* label) {
-//   // 送信
-//   PUMP_SERIAL.write(cmd, 8);
-
-//   // デバッグ（USB側に出す）
-//   PU_DEBUG_PRINT("[PUMP] ");
-//   PU_DEBUG_PRINT(label);
-//   PU_DEBUG_PRINT(" : ");
-//   for (int i = 0; i < 8; i++) {
-//     if (cmd[i] < 0x10) PU_DEBUG_PRINT('0');
-//     PU_DEBUG_PRINT(cmd[i], HEX);
-//     PU_DEBUG_PRINT(' ' );
-//   }
-//   PU_DEBUG_PRINTLN();
-
-//   //====================================================
-//   // [追加] RPMを送る＝インバータ動作中なのでファンON
-//   //====================================================
-//   // if (label && strcmp(label, "RPM") == 0) {
-//   //   fan_on();   // ※ファンがLOWアクティブならLOWにする
-//   //   PU_DEBUG_PRINTLN("pump_write8: FAN_CTRL_PIN set HIGH (RPM command sent)");
-//   // } else {
-//   //   // それ以外のコマンドはファンOFF（停止コマンド等）
-//   //   fan_off();    // ※ファンがLOWアクティブならLOWにする
-//   //   PU_DEBUG_PRINTLN("pump_write8: FAN_CTRL_PIN set LOW (non-RPM command sent)");
-//   // }
-// }
-
-// for debug:無事動いたら削除してよい
-//====================================================
 // 0x10 応答のエラーコード文字列化（仕様書の項目）
 //====================================================
 const char* motor_err_str(uint8_t code) {
@@ -1509,20 +1479,6 @@ void pump_write(const uint8_t* cmd, uint8_t len, const char* label) {
   // 送信
   PUMP_SERIAL.write(cmd, len);
 
-  // デバッグ（USB側）
-  #if 0
-  PU_DEBUG_PRINT("[PUMP] ");
-  PU_DEBUG_PRINT(label ? label : "(null)");
-  PU_DEBUG_PRINT(" (len=");
-  PU_DEBUG_PRINT(len);
-  PU_DEBUG_PRINT(") : ");
-
-  for (uint8_t i = 0; i < len; i++) {
-    if (cmd[i] < 0x10) PU_DEBUG_PRINT('0');
-    PU_DEBUG_PRINT(cmd[i], HEX);
-    PU_DEBUG_PRINT(' ');
-  }
-  #endif
   // PU_DEBUG_PRINT("PUMP_CURRENT_THRESHOLD=");  
   PU_DEBUG_PRINT(PUMP_CURRENT_THRESHOLD);
   // PU_DEBUG_PRINT("  lastCurrentPeak=");        
