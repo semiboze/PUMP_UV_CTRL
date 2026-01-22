@@ -143,6 +143,14 @@ static inline bool isUvSignalOk(int pin) {
   // BROKEN(外部LOW駆動) / FLOATING(未接続) は false → 点滅側へ
   return (s == UV_SENSE_OK);
 }
+// UV入力ピンの pinMode を返す
+static inline uint8_t getUvInputPinMode() {
+#if UV_IN_USE_INTERNAL_PULLUP
+  return INPUT_PULLUP;
+#else
+  return INPUT;
+#endif
+}
 
 //=========================================================
 // [追加] UVインジケータ表示（OK=点灯 / NG=点滅）
@@ -349,7 +357,7 @@ void uv_setup(int detected_lamp_count) {
   
   // ピンモード設定のループを、固定値ではなく検出したランプ数で行う
   for(int i = 0; i < numActiveUvLamps; i++) {
-    pinMode(uvInPins[i], INPUT);
+    pinMode(uvInPins[i], getUvInputPinMode());
     pinMode(uvOutPins[i], OUTPUT);
   } 
 
@@ -407,50 +415,48 @@ void runStartupLedSequence(int lampCount) {
     "UV_LAMP_PIN      "
   };
   const int numStaticLEDs = sizeof(staticLEDs) / sizeof(staticLEDs[0]);
-  const int main_interval = 1000;  // 固定LEDの点灯/消灯の間隔 (ミリ秒)
-  const int sweep_interval = 500;  // UVランプを流れるように点灯させる間隔 (ミリ秒)
-  const int Sequence_interval = 100; // シーケンス開始前の待機時間 (ミリ秒)
+  const int main_interval = 500;  // 固定LEDの点灯/消灯の間隔 (ミリ秒)
+  const int sweep_interval = 250;  // UVランプを流れるように点灯させる間隔 (ミリ秒)
+  const int Sequence_interval = 50; // シーケンス開始前の待機時間 (ミリ秒)
 
   // --- シーケンス開始 ---
   UV_DEBUG_PRINTLN("Starting LED self-check sequence...");
 
-  // 1. 固定LEDを順番に点灯・消灯
-  for(int i = 0; i < numStaticLEDs; i++) {
-    digitalWrite(staticLEDs[i], HIGH);
-    delay(Sequence_interval);
-    UV_DEBUG_PRINTLN(String(staticLEDNames[i]) + " ON");
-  }
-  delay(main_interval);  
-  for(int i = 0; i < numStaticLEDs; i++) {
-    digitalWrite(staticLEDs[i], LOW);
-    delay(Sequence_interval);
-    UV_DEBUG_PRINTLN(String(staticLEDNames[i]) + " OFF");
+  //                                                      1. 制御ランプを順番に点灯・消灯
+  for(int i = 0; i < numStaticLEDs; i++) {                // 制御ランプ点灯
+    digitalWrite(staticLEDs[i], HIGH);                    // 制御ランプ点灯
+    delay(50);                                            // 少し待つ
+    UV_DEBUG_PRINTLN(String(staticLEDNames[i]) + " ON");  // デバッグ表示
   }
 
   // 2. 検出したUVランプを流れるように点灯と消灯 (スイープON)
-  if (lampCount > 0) {
-    for(int i = 0; i < lampCount; i++) {
-      digitalWrite(uvOutPins[i], HIGH);
-      delay(sweep_interval);
-      digitalWrite(uvOutPins[i], LOW);
+  if (lampCount > 0) {                                    // UVランプがある場合のみ実行
+    for(int i = 0; i < lampCount; i++) {                  // UVランプ点灯     
+      digitalWrite(uvOutPins[i], HIGH);                   // UVランプ点灯
+      delay(100);                              // 少し待つ            
+      digitalWrite(uvOutPins[i], LOW);                    // UVランプ消灯      
     }
-    delay(500); // 全消灯後に少し間を空ける
+    delay(50);                                           // 全消灯後に少し間を空ける
 
     // 3. 検出したUVランプを流れるように点灯と消灯
-    for(int i = 0; i < lampCount; i++) {
-      digitalWrite(uvOutPins[i], HIGH);
-      delay(sweep_interval);
+    for(int i = 0; i < lampCount; i++) {                  // UVランプ点灯    
+      digitalWrite(uvOutPins[i], HIGH);                   // UVランプ点灯
+      delay(100);                              // 少し待つ              
     }
-    delay(500);
     for(int i = lampCount - 1; i >= 0; i--) {
       digitalWrite(uvOutPins[i], LOW);
-      delay(sweep_interval);
+      delay(100);
     }
   }
+  for(int i = 0; i < numStaticLEDs; i++) {                // 制御ランプ消灯
+    digitalWrite(staticLEDs[i], LOW);                     // 制御ランプ消灯
+    delay(50);                                           // 少し待つ
+    UV_DEBUG_PRINTLN(String(staticLEDNames[i]) + " OFF"); // デバッグ表示
+  }
 
-  // delay(main_interval / 2); // 少し間を空ける
-
-  for(int j = 0; j < 1; j++) {
+  int lampLoopCount = lampCount < 1 ? 1 : lampCount; // ランプが0の場合は1回だけループする
+  // 4. 全てのLEDを同時に点灯・消灯をlampLoopCount回
+  for(int j = 0; j < lampLoopCount; j++) {
     // 4. 全てのLEDを同時に点灯・消灯をj回
     for(int i = 0; i < numStaticLEDs; i++) { // 制御ランプ点灯
       digitalWrite(staticLEDs[i], HIGH);
@@ -460,7 +466,7 @@ void runStartupLedSequence(int lampCount) {
       digitalWrite(uvOutPins[i], HIGH);
       delay(1);
     }
-    delay(main_interval);
+    delay(250);
 
     for(int i = 0; i < numStaticLEDs; i++) { // 制御ランプ消灯
       digitalWrite(staticLEDs[i], LOW);
@@ -470,6 +476,7 @@ void runStartupLedSequence(int lampCount) {
       digitalWrite(uvOutPins[i], LOW);
       delay(1);
     }
+    delay(250);
   }
   UV_DEBUG_PRINTLN("LED self-check sequence complete.");
 }
@@ -482,6 +489,7 @@ static UvSense readUvSenseNoResistor(int pin) {
   //  - そのままだと「プルアップ無しで読む」つもりが、実際はプルアップが残り v_no_pull=HIGH になりやすい
   //  - 対策：INPUTにした直後に digitalWrite(pin, LOW) を必ず入れて内部プルアップを確実にOFFにする
   //=========================================================
+  // ここはINPUT_PULLUPを指定しないでソース通りに一度INPUTで読んでみて外部抵抗の有無を確認する
 
   // --- 1) プルアップ無しで読む（外部が本当に駆動してるかを見る） ---
   pinMode(pin, INPUT);
