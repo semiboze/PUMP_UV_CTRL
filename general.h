@@ -69,7 +69,7 @@ const int MAX_UV_LAMPS = 10;
 
 // 0: INPUT（外付け抵抗あり想定）
 // 1: INPUT_PULLUP（抵抗なし検証用）
-#define UV_IN_USE_INTERNAL_PULLUP  1
+#define UV_IN_USE_INTERNAL_PULLUP  0
 
 #endif  // GENERAL_H_INCLUDED
 // --- ここまで共通型定義・共有シンボル宣言 ---

@@ -1,7 +1,7 @@
 /**
  * @file dynamic_rpm_pump_controller.ino
  * @brief 統合・改良版 ポンプ＆UVランプコントローラー (ハードウェア自動検知版)
- * @version 20250910_R2 (Revision 2)
+ * @version 20260122_R4 
  *
  * @details
  * 起動時にハードウェアのピン設定を読み取り、回転数制御モードを自動で切り替えます。
@@ -46,7 +46,7 @@
 //====================================================
 #define FORCE_RUN_NO_STOP  1
 
-const char* FirmwareVersion = "20260122_R2";
+const char* FirmwareVersion = "20260122_R4";
 // ----------------------------------------------------------------
 // ▼▼▼ 動作設定 ▼▼▼
 // ----------------------------------------------------------------
@@ -535,27 +535,29 @@ void sendStopCommand() {
   PU_DEBUG_PRINTLN("Sent: Stop Command to Inverter");
 }
 
-// 回転数コマンド送信（ポンプ起動時や定期送信で使用）
 void sendRpmCommand(int rpm) {
+
+  //====================================================
+  // 最低回転数ガード（500rpm未満は仕様上「停止」扱い）
+  //====================================================
+  if (rpm < 600) rpm = 600;   // ← ★必須★
+
   double analog_value_f = (rpm + 5.092) / 17.945;
   if (analog_value_f > 139.6) analog_value_f = 139.6;
-  if (analog_value_f < 34.0) analog_value_f = 34.0;
+  if (analog_value_f < 34.0)  analog_value_f = 34.0;
+
   byte analog_value = (byte)analog_value_f;
 
-  // ★重要★ 継続運転なら D5=0xFF を推奨（運転継続側）
   byte command[8] = {0x00, 0x01, 0x10, 0x02, analog_value, 0xFF, 0x00, 0x00};
 
   byte sum = 0;
-  for(int i = 0; i < 7; i++) { sum += command[i]; }
+  for (int i = 0; i < 7; i++) sum += command[i];
   command[7] = 0x55 - sum;
-  pump_write8(command, "RPM"); // インバーターへ回転数コマンド送信
-  //====================================================
-  // [追加] RPM命令を送った＝運転指令中
-  //====================================================
-  if (rpm > 0) {
-    pumpRunCommandActive = true;
-    lastRpmCommandMs = millis();
-  }
+
+  pump_write8(command, "RPM");
+
+  pumpRunCommandActive = true;
+  lastRpmCommandMs = millis();
 }
 
 // ============================================================

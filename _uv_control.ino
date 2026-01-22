@@ -137,11 +137,12 @@ Switch uvStopSwitch    = {UV_SW_STOP_PIN,   HIGH, HIGH, 0};
 static inline bool isUvSignalOk(int pin) {
 
   // 既存の enum UvSense と判定関数を使う（ファイル内に既に宣言済み）
-  UvSense s = readUvSenseNoResistor(pin);
+  // UvSense s = readUvSenseNoResistor(pin);2026-01-22
+  return (digitalRead(pin) == HIGH);
 
   // OK（外部がHIGHを駆動）だけ true
   // BROKEN(外部LOW駆動) / FLOATING(未接続) は false → 点滅側へ
-  return (s == UV_SENSE_OK);
+  // return (s == UV_SENSE_OK);
 }
 // UV入力ピンの pinMode を返す
 static inline uint8_t getUvInputPinMode() {
@@ -284,6 +285,10 @@ void handleUvSwitchInputs() {
 
     // ★追加★：Startを押したら「運転ランプ」だけは必ず点灯開始（Stopまで保持）
     uvRunLampLatched = true;
+    UV_DEBUG_PRINT("START PIN28 mode=");
+    UV_DEBUG_PRINT(digitalRead(28));
+    UV_DEBUG_PRINT("   PIN29 mode=");
+    UV_DEBUG_PRINTLN(digitalRead(29));
 
     if (uvLampState == STATE_STOPPED) {
 
@@ -315,6 +320,10 @@ void handleUvSwitchInputs() {
       UV_DEBUG_PRINTLN("");
       // RUNNINGになったら「未接続点滅」は解除（通常ロジックへ）
       uvMissingBlinkActive = false;
+      UV_DEBUG_PRINT("PIN28 mode=");
+      UV_DEBUG_PRINT(digitalRead(28));
+      UV_DEBUG_PRINT("   PIN29 mode=");
+      UV_DEBUG_PRINTLN(digitalRead(29));
     }
   }
 }
