@@ -52,7 +52,7 @@ const char* FirmwareVersion = "20260130_R1";
 // ----------------------------------------------------------------
 // 固定回転数モードで動作する場合の回転数を設定します。
 const int NORMAL_MAX_RPM = 2500;        // 固定回転数モードでの最大回転数
-const int PRIMING_DURATION_SEC = 30;     // プライミングを行う時間（秒）
+const int PRIMING_DURATION_SEC = 0;     // プライミングを行う時間（秒）
 const float HOLD_DURATION_SEC = 1.0;    // 最高回転数での保持時間（秒）
 const int PRIMING_MAX_RPM      = 2500;  // プライミング中の最大回転数
 const int PRIMING_MIN_RPM      = 2000;  // プライミング中の最小回転数
