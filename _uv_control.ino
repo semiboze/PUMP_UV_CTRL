@@ -125,7 +125,7 @@ const unsigned long UV_NG_LATCH_MS = 3000;
 // const int NUM_UV_LAMPS = sizeof(uvInPins) / sizeof(uvInPins[0]);
 
 // グローバル変数
-SystemState uvLampState = STATE_STOPPED;
+// SystemState uvLampState = STATE_STOPPED;
 Switch uvStartSwitch   = {UV_SW_START_PIN,  HIGH, HIGH, 0};
 Switch uvStopSwitch    = {UV_SW_STOP_PIN,   HIGH, HIGH, 0};
 
@@ -258,6 +258,8 @@ void handleUvSwitchInputs() {
 
     if (uvLampState == STATE_RUNNING) {
       uvLampState = STATE_STOPPED;
+      persist.uv = 0;
+      savePersistState();
       UV_DEBUG_PRINTLN("UV Stop Switch ON");
     }
 
@@ -302,11 +304,17 @@ void handleUvSwitchInputs() {
         // ★未接続/断線も見たいので点滅ラッチON
         uvMissingBlinkActive = true;
         uvCheckStartMs = millis();   // ★追加  
+        // ★★★ ここを追加 ★★★
+        persist.uv = 1;
+        savePersistState();
         return;
       }
 
       // 起動条件OK：通常RUNNING
       uvLampState = STATE_RUNNING;
+      persist.uv = 1;
+      savePersistState();
+
       UV_DEBUG_PRINTLN("UV Start Switch ON");
       // ★即時に状態表示（10秒待たない）
       UV_DEBUG_PRINT("UV Lamps Status ");
@@ -529,4 +537,16 @@ static UvSense readUvSenseNoResistor(int pin) {
   digitalWrite(pin, LOW);       // 内部プルアップOFF状態で戻す
 
   return result;
+}
+void uv_force_restore(bool run) {
+  if (run) {
+    uvLampState = STATE_RUNNING;
+    uvRunLampLatched = true;      // ★必須
+    uvMissingBlinkActive = false;
+    uvRelayForceOnForCheck = false;
+  } else {
+    uvLampState = STATE_STOPPED;
+    uvRunLampLatched = false;
+    uvRelayForceOnForCheck = false;
+  }
 }

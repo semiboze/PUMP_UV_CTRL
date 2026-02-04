@@ -46,7 +46,7 @@
 //====================================================
 #define FORCE_RUN_NO_STOP 0
 
-const char* FirmwareVersion = "20260130_R1";
+const char* FirmwareVersion = "20260204_R1";
 // ----------------------------------------------------------------
 // ▼▼▼ 動作設定 ▼▼▼
 // ----------------------------------------------------------------
@@ -72,6 +72,7 @@ const int CURRENT_NOISE_FLOOR = 512;
 // ----------------------------------------------------------------
 #include <FlexiTimer2.h>
 #include <math.h> // ← この行を追加
+#include <EEPROM.h>   // ← 追加 2026年2月4日
 #include "TM1637.h"
 #include "general.h" // デバッグマクロ包含
 // 【変更点】UVコントロール用のヘッダファイルをインクルード
@@ -105,6 +106,8 @@ const int UV_DETECT_BIT3_PIN = A6; // 8加算 (2^3)
 // ----------------------------------------------------------------
 enum SystemState { STATE_STOPPED, STATE_RUNNING };
 SystemState pumpState = STATE_STOPPED;
+SystemState uvLampState = STATE_STOPPED;   // ← これを必ず追加
+
 //====================================================
 // [追加] ポンプ「運転指令」フラグ
 //  - インバータに「回せ」と命令している間 true
@@ -263,6 +266,18 @@ int baselineAvg = 0;
 int riseConsecutive = 0;          // 上昇連続回数
 bool suctionRiseDetected = false; // 2次上昇を検知したか
 
+// 停電後の復旧用メモリ確保
+#define EEPROM_MAGIC 0xA5
+#define EEPROM_ADDR  0
+
+struct PersistState {
+  uint8_t magic;
+  uint8_t pump;
+  uint8_t uv;
+};
+
+PersistState persist;
+
 // ----------------------------------------------------------------
 // setup() - 初期化処理
 // ----------------------------------------------------------------
@@ -380,6 +395,43 @@ if (inverter_confirmed) {
   #ifdef PU_DEBUG_MODE
     tm1_rpm_rpm.displayNum(123); tm2_cur_thr.displayNum(456); tm3_cur_pea.displayNum(789);
   #endif
+  // =================================================
+  // EEPROM 復旧処理
+  // =================================================
+  bool restored = loadPersistState();
+
+  DEBUG_PRINT("[SETUP] restored=");
+  DEBUG_PRINTLN(restored ? "YES" : "NO");
+
+  DEBUG_PRINT("[SETUP] apply pumpState=");
+  DEBUG_PRINTLN(persist.pump);
+
+  DEBUG_PRINT("[SETUP] apply uvState=");
+  DEBUG_PRINTLN(persist.uv);
+
+  if (restored) {
+    DEBUG_PRINTLN("EEPROM state restored");
+
+    // --- ポンプ ---
+    if (persist.pump == 1) {
+      pumpState = STATE_RUNNING;
+      pumpStartTime = millis();
+    } else {
+      pumpState = STATE_STOPPED;
+    }
+
+    // --- UV ---
+    if (persist.uv == 1) {
+      uv_force_restore(true);
+    } else {
+      uv_force_restore(false);
+    }
+
+  } else {
+    DEBUG_PRINTLN("EEPROM not initialized -> SAFE STOP");
+    pumpState = STATE_STOPPED;
+    uvLampState = STATE_STOPPED;
+  }
 }
 
 // ----------------------------------------------------------------
@@ -639,6 +691,8 @@ void stopPump() {
   sendStopCommand();
 
   PU_DEBUG_PRINTLN("Pump Stop Sequence Executed (lamp forced OFF).");
+  persist.pump = 0;
+  savePersistState();
 }
 
 // スイッチ検出処理
@@ -688,6 +742,8 @@ void handleSwitchInputs() {
       // 状態遷移
       //====================================================
       pumpState = STATE_RUNNING;
+      persist.pump = 1;
+      savePersistState();
       pumpStartTime = millis();
 
       //====================================================
@@ -1475,4 +1531,44 @@ void pump_write(const uint8_t* cmd, uint8_t len, const char* label) {
   PU_DEBUG_PRINT("  ");
   PU_DEBUG_PRINT(lastCurrentPeak);
   PU_DEBUG_PRINTLN();
+}
+
+// EEPROMから状態を読む
+bool loadPersistState() {
+  EEPROM.get(EEPROM_ADDR, persist);
+
+  DEBUG_PRINT("[EEPROM] read magic=");
+  DEBUG_PRINT(persist.magic, HEX);
+  DEBUG_PRINT(" pump=");
+  DEBUG_PRINT(persist.pump);
+  DEBUG_PRINT(" uv=");
+  DEBUG_PRINTLN(persist.uv);
+
+  if (persist.magic != EEPROM_MAGIC) {
+    DEBUG_PRINTLN("[EEPROM] INVALID -> initialize");
+
+    persist.magic = EEPROM_MAGIC;
+    persist.pump  = 0;
+    persist.uv    = 0;
+
+    EEPROM.put(EEPROM_ADDR, persist);
+
+    DEBUG_PRINTLN("[EEPROM] initialized and saved");
+    return false;
+  }
+
+  DEBUG_PRINTLN("[EEPROM] VALID");
+  return true;
+}
+
+// 状態をEEPROMへ保存
+void savePersistState() {
+  persist.magic = EEPROM_MAGIC;
+
+  DEBUG_PRINT("[EEPROM] SAVE pump=");
+  DEBUG_PRINT(persist.pump);
+  DEBUG_PRINT(" uv=");
+  DEBUG_PRINTLN(persist.uv);
+
+  EEPROM.put(EEPROM_ADDR, persist);
 }
