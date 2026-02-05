@@ -277,10 +277,10 @@ void checkUvLampConnection() {
   //  - UVが有効なときのみ判定
   //=========================================================
   if (uvFaultCheckEnabled) {
-    if (isUvHalfBroken()) {
+    if (isUvFaultDetected()) {
       digitalWrite(EM_LAMP_PIN, HIGH);
     } else {
-      // ポンプ由来の警告が無い前提でのみ消す
+      // ポンプ由来の警告が無いときだけ消灯
       if (!pumpStartupError) {
         digitalWrite(EM_LAMP_PIN, LOW);
       }
@@ -681,4 +681,31 @@ static bool isUvHalfBroken() {
   }
 
   return false;
+}
+//=========================================================
+// [改] DIP設定に応じたUV断線判定
+//=========================================================
+static bool isUvFaultDetected() {
+
+  int half = uvGroupSize();
+  if (half == 0) return false;
+
+  int brokenA = 0;
+  int brokenB = 0;
+
+  for (int i = 0; i < half; i++) {
+    if (!isUvSignalOk(uvInPins[i])) brokenA++;
+  }
+  for (int i = half; i < numActiveUvLamps; i++) {
+    if (!isUvSignalOk(uvInPins[i])) brokenB++;
+  }
+
+  // DIP_SW3 = ON → 1本でもNG
+  if (cfg_uvFaultAnyOneNg) {
+    return (brokenA > 0 || brokenB > 0);
+  }
+
+  // DIP_SW3 = OFF → 過半数
+  int threshold = (half / 2) + 1;
+  return (brokenA >= threshold || brokenB >= threshold);
 }

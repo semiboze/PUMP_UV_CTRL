@@ -46,7 +46,7 @@
 //====================================================
 #define FORCE_RUN_NO_STOP 0
 
-const char* FirmwareVersion = "20260205_R1";
+const char* FirmwareVersion = "20260205_R3";
 // ----------------------------------------------------------------
 // ▼▼▼ 動作設定 ▼▼▼
 // ----------------------------------------------------------------
@@ -95,6 +95,20 @@ const int LED_ISR_PIN       = LED_BUILTIN, LED_SERIAL_RX_PIN     = 50;
 const int RPM_ANALOG_IN_PIN = A0 ;       // 回転数調整ダイヤル可変抵抗 (ポテンショメーター) 接続ピン
 const int CURRENT_ANALOG_IN_PIN = A1;    // ポンプの電流センサー接続ピン
 const int THRESHOLD_ANALOG_IN_PIN = A2;  // [変更点] 電流しきい値調整用のダイヤル可変抵抗を接続するアナログピン
+//==============================
+// DIPスイッチ GPIO割当
+//==============================
+const int DIP_SW1_PIN = 52;
+const int DIP_SW2_PIN = 53;
+const int DIP_SW3_PIN = 50;
+const int DIP_SW4_PIN = 51;
+//==============================
+// DIP設定フラグ
+//==============================
+bool cfg_restoreUvAfterPowerFail = true;
+bool cfg_hourMeterIncludeUv      = true;
+bool cfg_uvFaultAnyOneNg         = false;
+bool cfg_uvAutoStart             = false;
 
 // UVランプ装着数自動検知用のピン定義（4ビットバイナリ）ただし10本まで対応
 const int UV_DETECT_BIT0_PIN = A3; // 1加算 (2^0)
@@ -286,39 +300,48 @@ void setup() {
   //--- ポンプ通信用（インバーター） ---
   PUMP_SERIAL.begin(2400);       // ← いまインバーターに合わせている速度にする
   DEBUG_PRINTLN("--- System Start ---");
+  
+  //====================================================
+  pinMode(DIP_SW1_PIN, INPUT_PULLUP);
+  pinMode(DIP_SW2_PIN, INPUT_PULLUP);
+  pinMode(DIP_SW3_PIN, INPUT_PULLUP);
+  pinMode(DIP_SW4_PIN, INPUT_PULLUP);
+
+  cfg_restoreUvAfterPowerFail = (digitalRead(DIP_SW1_PIN) == LOW);
+  cfg_hourMeterIncludeUv      = (digitalRead(DIP_SW2_PIN) == LOW);
+  cfg_uvFaultAnyOneNg         = (digitalRead(DIP_SW3_PIN) == LOW);
+  cfg_uvAutoStart             = (digitalRead(DIP_SW4_PIN) == LOW);
+  // [改善] CONFIRMは「確認できたら終わり」にする
+  // - 何回送るか固定にしない
+  // - 受信側(handleSerialCommunication)が inverter_confirmed=true にする設計と整合
+  //====================================================
+  inverter_confirmed = false;
+
+  const unsigned long CONFIRM_TIMEOUT_MS = 800;  // 全体の待ち時間（好みで調整）
+  const unsigned long CONFIRM_RETRY_MS   = 80;   // 再送間隔（応答0～100ms想定ならこのくらい）
+  unsigned long startMs = millis();
+  unsigned long lastSendMs = 0;
+
   // ★追加★ 確認コマンドを最低1回送る（仕様書要求）
   // ここでは3回だけ軽くリトライ（応答処理は後述の受信側でconfirmedにする）
-  //====================================================
+  int i = 0;
+  while (!inverter_confirmed && (millis() - startMs < CONFIRM_TIMEOUT_MS)) {
+    PU_DEBUG_PRINT("Sending CONFIRM command to Inverter...");PU_DEBUG_PRINTLN(i++);
+    // 一定間隔でCONFIRMを再送
+    if (millis() - lastSendMs >= CONFIRM_RETRY_MS) {
+      sendConfirmCommand();
+      lastSendMs = millis();
+    }
 
-  // [改善] CONFIRMは「確認できたら終わり」にする
-// - 何回送るか固定にしない
-// - 受信側(handleSerialCommunication)が inverter_confirmed=true にする設計と整合
-//====================================================
-inverter_confirmed = false;
-
-const unsigned long CONFIRM_TIMEOUT_MS = 800;  // 全体の待ち時間（好みで調整）
-const unsigned long CONFIRM_RETRY_MS   = 80;   // 再送間隔（応答0～100ms想定ならこのくらい）
-unsigned long startMs = millis();
-unsigned long lastSendMs = 0;
-
-int i = 0;
-while (!inverter_confirmed && (millis() - startMs < CONFIRM_TIMEOUT_MS)) {
-  PU_DEBUG_PRINT("Sending CONFIRM command to Inverter...");PU_DEBUG_PRINTLN(i++);
-  // 一定間隔でCONFIRMを再送
-  if (millis() - lastSendMs >= CONFIRM_RETRY_MS) {
-    sendConfirmCommand();
-    lastSendMs = millis();
+    // 受信処理を回してACKを拾う（ここが重要）
+    handleSerialCommunication();
   }
 
-  // 受信処理を回してACKを拾う（ここが重要）
-  handleSerialCommunication();
-}
-
-if (inverter_confirmed) {
-  PU_DEBUG_PRINTLN("CONFIRM OK: inverter_confirmed=true");
-} else {
-  PU_DEBUG_PRINTLN("CONFIRM TIMEOUT: continue without confirmed (check wiring/baud)");
-}
+  if (inverter_confirmed) {
+    PU_DEBUG_PRINTLN("CONFIRM OK: inverter_confirmed=true");
+  } else {
+    PU_DEBUG_PRINTLN("CONFIRM TIMEOUT: continue without confirmed (check wiring/baud)");
+  }
 
   // [変更点] 起動時にハードウェア設定を読み込み、RPM制御モードを決定
   pinMode(MANUAL_RPM_MODE_PIN, INPUT_PULLUP);
