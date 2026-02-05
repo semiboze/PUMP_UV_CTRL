@@ -48,6 +48,10 @@ extern const int UV_SW_STOP_PIN;
 // ★追加★ ポンプ起動完了フラグ／エラーフラグ 2025-12-09
 extern bool pumpStartupOk;
 extern bool pumpStartupError;
+//====================================================
+// [追加] UV側：片側過半数断線警告フラグ
+//====================================================
+extern bool uvHalfBrokenWarning;
 
 struct Switch;   // ← 型が後で出てくることを宣言だけする
 extern Switch uvStopSwitch;

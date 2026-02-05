@@ -46,7 +46,7 @@
 //====================================================
 #define FORCE_RUN_NO_STOP 0
 
-const char* FirmwareVersion = "20260205_R1";
+const char* FirmwareVersion = "20260204_R1";
 // ----------------------------------------------------------------
 // ▼▼▼ 動作設定 ▼▼▼
 // ----------------------------------------------------------------
@@ -769,23 +769,6 @@ void handleSwitchInputs() {
     stopPump();
   }
 }
-//====================================================
-// [追加] 非常停止ランプ（EM）統合制御
-//====================================================
-static void updateEmLamp() {
-
-#if FORCE_RUN_NO_STOP
-  digitalWrite(EM_LAMP_PIN, LOW);
-  return;
-#endif
-
-  // ポンプ起動失敗 / 過電流 / UV片側過半数断線
-  if (pumpStartupError || uvHalfBrokenWarning) {
-    digitalWrite(EM_LAMP_PIN, HIGH);
-  } else {
-    digitalWrite(EM_LAMP_PIN, LOW);
-  }
-}
 
 // ポンプの状態更新
 void updateSystemState() {
@@ -858,7 +841,6 @@ void updateSystemState() {
     // digitalWrite(LED_PUMP_RUN_PIN, LOW);
     // digitalWrite(LED_PUMP_STOP_PIN, HIGH);
   }
-  updateEmLamp();   // ★追加：EMランプはここで一括制御
 }
 
 
