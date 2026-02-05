@@ -139,6 +139,13 @@ Switch uvStartSwitch   = {UV_SW_START_PIN,  HIGH, HIGH, 0};
 Switch uvStopSwitch    = {UV_SW_STOP_PIN,   HIGH, HIGH, 0};
 
 //=========================================================
+// UVグループ境界
+//=========================================================
+static inline int uvGroupSize() {
+  return numActiveUvLamps / 2;
+}
+
+//=========================================================
 // [改] 外付け抵抗なしでも「未接続(浮き)」をNGにするUV入力判定
 //  - 目的：未接続チャンネル(浮き)を「OK」と誤判定させない
 //  - 方法：プルアップ無し/有りで2回読んで「浮き」を推定
@@ -264,6 +271,20 @@ void checkUvLampConnection() {
       UV_DEBUG_PRINT(", ");
     }
     UV_DEBUG_PRINTLN("");
+  }
+  //=========================================================
+  // [追加] UV断線による警告ランプ制御
+  //  - UVが有効なときのみ判定
+  //=========================================================
+  if (uvFaultCheckEnabled) {
+    if (isUvHalfBroken()) {
+      digitalWrite(EM_LAMP_PIN, HIGH);
+    } else {
+      // ポンプ由来の警告が無い前提でのみ消す
+      if (!pumpStartupError) {
+        digitalWrite(EM_LAMP_PIN, LOW);
+      }
+    }
   }
 }
 
@@ -625,4 +646,39 @@ static void updateUvHalfBrokenWarning() {
   uvHalfBrokenWarning =
     isUvHalfBroken(leftBroken) ||
     isUvHalfBroken(rightBroken);
+}
+//=========================================================
+// [追加] UV左右筒ごとの過半数断線チェック
+//  - どちらか一方がNGなら true を返す
+//=========================================================
+static bool isUvHalfBroken() {
+
+  int half = uvGroupSize();
+  if (half == 0) return false; // 念のため
+
+  int brokenA = 0;
+  int brokenB = 0;
+
+  // --- グループA ---
+  for (int i = 0; i < half; i++) {
+    if (!isUvSignalOk(uvInPins[i])) {
+      brokenA++;
+    }
+  }
+
+  // --- グループB ---
+  for (int i = half; i < numActiveUvLamps; i++) {
+    if (!isUvSignalOk(uvInPins[i])) {
+      brokenB++;
+    }
+  }
+
+  // 過半数しきい値
+  int threshold = (half / 2) + 1;
+
+  if (brokenA >= threshold || brokenB >= threshold) {
+    return true;
+  }
+
+  return false;
 }
