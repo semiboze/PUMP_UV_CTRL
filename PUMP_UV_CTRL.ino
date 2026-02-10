@@ -1,3 +1,4 @@
+const char* FirmwareVersion = "20260206_R1";
 /**
  * @file dynamic_rpm_pump_controller.ino
  * @brief 統合・改良版 ポンプ＆UVランプコントローラー (ハードウェア自動検知版)
@@ -44,9 +45,8 @@
 //  - 1: どんな検出でも止めない / EMランプ点灯しない
 //  - 0: 通常運用（現状の安全停止あり）
 //====================================================
-#define FORCE_RUN_NO_STOP 0
+#define FORCE_RUN_NO_STOP 1
 
-const char* FirmwareVersion = "20260205_R3";
 // ----------------------------------------------------------------
 // ▼▼▼ 動作設定 ▼▼▼
 // ----------------------------------------------------------------
@@ -98,15 +98,21 @@ const int THRESHOLD_ANALOG_IN_PIN = A2;  // [変更点] 電流しきい値調整
 //==============================
 // DIPスイッチ GPIO割当
 //==============================
-const int DIP_SW1_PIN = 52;
-const int DIP_SW2_PIN = 53;
-const int DIP_SW3_PIN = 50;
-const int DIP_SW4_PIN = 51;
+// DIPスイッチ（A8〜A15）
+const int DIP_SW1_PIN = A8;   // 停電復帰
+const int DIP_SW2_PIN = A9;   // HourMeter bit2 (Pump)
+const int DIP_SW3_PIN = A10;  // HourMeter bit1 (AND/OR)
+const int DIP_SW4_PIN = A11;  // HourMeter bit0 (UV)
+const int DIP_SW5_PIN = A12;  // 予備
+const int DIP_SW6_PIN = A13;  // UV断線判定方式
+const int DIP_SW7_PIN = A14;  // UV自動起動
+const int DIP_SW8_PIN = A15;  // 将来拡張
+
 //==============================
 // DIP設定フラグ
 //==============================
-bool cfg_restoreUvAfterPowerFail = true;
-bool cfg_hourMeterIncludeUv      = true;
+bool cfg_restoreUvAfterPowerFail = false;
+uint8_t cfg_hourMeterMode;   // 3bit
 bool cfg_uvFaultAnyOneNg         = false;
 bool cfg_uvAutoStart             = false;
 
@@ -220,6 +226,9 @@ void resetUvHourMeter();          // ★追加★ UVアワーメーターリセ�
 void both_stop_check_task();      // ★追加★★ 両方停止出力ピンの制御タスクプロトタイプ 2025年12月11日
 // ★追加：可変長送信（8/9共通）
 void pump_write(const uint8_t* cmd, uint8_t len, const char* label);
+static bool evaluateHourMeterCondition(uint8_t modeBits,
+                                       bool pumpRunning,
+                                       bool uvRunning);
 
 //====================================================
 // [追加] ポンプ(インバーター)通信用シリアルの統一窓口
@@ -302,15 +311,27 @@ void setup() {
   DEBUG_PRINTLN("--- System Start ---");
   
   //====================================================
-  pinMode(DIP_SW1_PIN, INPUT_PULLUP);
-  pinMode(DIP_SW2_PIN, INPUT_PULLUP);
-  pinMode(DIP_SW3_PIN, INPUT_PULLUP);
-  pinMode(DIP_SW4_PIN, INPUT_PULLUP);
-
+  pinMode(DIP_SW1_PIN, INPUT);
+  pinMode(DIP_SW2_PIN, INPUT);
+  pinMode(DIP_SW3_PIN, INPUT);
+  pinMode(DIP_SW4_PIN, INPUT);
+  pinMode(DIP_SW5_PIN, INPUT);
+  pinMode(DIP_SW6_PIN, INPUT);
+  pinMode(DIP_SW7_PIN, INPUT);
+  delay(5); // プルアップが安定するのを待つ
   cfg_restoreUvAfterPowerFail = (digitalRead(DIP_SW1_PIN) == LOW);
-  cfg_hourMeterIncludeUv      = (digitalRead(DIP_SW2_PIN) == LOW);
-  cfg_uvFaultAnyOneNg         = (digitalRead(DIP_SW3_PIN) == LOW);
-  cfg_uvAutoStart             = (digitalRead(DIP_SW4_PIN) == LOW);
+  // 例：DIP_SW2, DIP_SW3, DIP_SW4 を使用すると仮定
+  cfg_hourMeterMode = 0;
+  if (digitalRead(DIP_SW2_PIN) == LOW) cfg_hourMeterMode |= 0b100; // Pump
+  if (digitalRead(DIP_SW3_PIN) == LOW) cfg_hourMeterMode |= 0b010; // AND/OR
+  if (digitalRead(DIP_SW4_PIN) == LOW) cfg_hourMeterMode |= 0b001; // UV
+  // cfg_hourMeterIncludeUv      = (digitalRead(DIP_SW5_PIN) == LOW);
+  cfg_uvFaultAnyOneNg         = (digitalRead(DIP_SW6_PIN) == LOW);
+  cfg_uvAutoStart             = (digitalRead(DIP_SW7_PIN) == LOW);
+  DEBUG_PRINT("DIP_SW1 restore UV = ");
+  DEBUG_PRINTLN(cfg_restoreUvAfterPowerFail ? "ON" : "OFF");
+  DEBUG_PRINT("DIP_SW2 hourMeterIncludeUv = ");
+  // DEBUG_PRINTLN(cfg_hourMeterIncludeUv ? "ON" : "OFF");
   // [改善] CONFIRMは「確認できたら終わり」にする
   // - 何回送るか固定にしない
   // - 受信側(handleSerialCommunication)が inverter_confirmed=true にする設計と整合
@@ -443,13 +464,12 @@ void setup() {
       pumpState = STATE_STOPPED;
     }
 
-    // --- UV ---
-    if (persist.uv == 1) {
-      uv_force_restore(true);
+    // --- UV --- 復旧ディップスイッチに基づきメモリ読み込み
+    if (persist.uv == 1 && cfg_restoreUvAfterPowerFail) {
+      uv_force_restore(true);     // 停電前にUVがON かつ DIPで復帰許可
     } else {
-      uv_force_restore(false);
+      uv_force_restore(false);    // DIP OFF または 停電前OFF
     }
-
   } else {
     DEBUG_PRINTLN("EEPROM not initialized -> SAFE STOP");
     pumpState = STATE_STOPPED;
@@ -480,27 +500,53 @@ void loop() {
 // ================================================================
 
 // ★★★ T_CNT_PINの出力を制御する新設関数 ★★★
+// void updateTCntPin() {
+
+//   //====================================================
+//   // [改善] アワーメーターは「状態」ではなく「運転指令」で回す
+//   //====================================================
+//   bool isUvRunning = is_uv_running();
+
+//   // RPMコマンドが一定時間来ていないなら落とす（安全側）
+//   // ※継続送信間隔が300msなので、3秒以上来ないなら異常とみなす例
+//   const unsigned long RPM_WATCHDOG_MS = 3000;
+//   if (pumpRunCommandActive && (millis() - lastRpmCommandMs > RPM_WATCHDOG_MS)) {
+//     pumpRunCommandActive = false;
+//   }
+
+//   if (pumpRunCommandActive || isUvRunning) {
+//     digitalWrite(T_CNT_PIN, HIGH);
+//   } else {
+//     digitalWrite(T_CNT_PIN, LOW);
+//   }
+// }
 void updateTCntPin() {
+  bool pumpRunning = pumpRunCommandActive;
+  bool uvRunning   = is_uv_running();
 
-  //====================================================
-  // [改善] アワーメーターは「状態」ではなく「運転指令」で回す
-  //====================================================
-  bool isUvRunning = is_uv_running();
+  bool hourOn = evaluateHourMeterCondition(
+                  cfg_hourMeterMode,
+                  pumpRunning,
+                  uvRunning
+                );
 
-  // RPMコマンドが一定時間来ていないなら落とす（安全側）
-  // ※継続送信間隔が300msなので、3秒以上来ないなら異常とみなす例
-  const unsigned long RPM_WATCHDOG_MS = 3000;
-  if (pumpRunCommandActive && (millis() - lastRpmCommandMs > RPM_WATCHDOG_MS)) {
-    pumpRunCommandActive = false;
+  digitalWrite(T_CNT_PIN, hourOn ? HIGH : LOW);
+#ifdef DEBUG_MODE
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint > 2000) {
+    lastPrint = millis();
+    DEBUG_PRINT("HourMode=");
+    DEBUG_PRINT(cfg_hourMeterMode, BIN);
+    DEBUG_PRINT(" pump=");
+    DEBUG_PRINT(pumpRunning);
+    DEBUG_PRINT(" uv=");
+    DEBUG_PRINT(uvRunning);
+    DEBUG_PRINT(" -> ");
+    DEBUG_PRINTLN(hourOn);
   }
+#endif
 
-  if (pumpRunCommandActive || isUvRunning) {
-    digitalWrite(T_CNT_PIN, HIGH);
-  } else {
-    digitalWrite(T_CNT_PIN, LOW);
-  }
 }
-
 
 // [変更点] 電流しきい値を可変抵抗から読み取り更新する関数
 void updateCurrentThreshold() {
@@ -796,12 +842,6 @@ void handleSwitchInputs() {
 // [追加] 非常停止ランプ（EM）統合制御
 //====================================================
 static void updateEmLamp() {
-
-#if FORCE_RUN_NO_STOP
-  digitalWrite(EM_LAMP_PIN, LOW);
-  return;
-#endif
-
   // ポンプ起動失敗 / 過電流 / UV片側過半数断線
   if (pumpStartupError || uvHalfBrokenWarning) {
     digitalWrite(EM_LAMP_PIN, HIGH);
@@ -1612,4 +1652,35 @@ void savePersistState() {
   DEBUG_PRINTLN(persist.uv);
 
   EEPROM.put(EEPROM_ADDR, persist);
+}
+//====================================================
+// [追加] アワーメーター判定ロジック（3bit DIP対応）
+// bit2 : Pump条件
+// bit1 : 0=AND / 1=OR
+// bit0 : UV条件
+//====================================================
+static bool evaluateHourMeterCondition(uint8_t modeBits,
+                                       bool pumpRunning,
+                                       bool uvRunning)
+{
+  // --- ビット展開 ---
+  bool pumpBit = (modeBits & 0b100) != 0;
+  bool logicOr = (modeBits & 0b010) != 0;
+  bool uvBit   = (modeBits & 0b001) != 0;
+
+  // --- 各条件の評価 ---
+  // pumpBit = 1 → pumpRunning を使う
+  // pumpBit = 0 → pumpRunning を無視（true扱い）
+  bool pumpCond = pumpBit ? pumpRunning : true;
+
+  // uvBit = 1 → uvRunning を使う
+  // uvBit = 0 → uvRunning を無視（true扱い）
+  bool uvCond   = uvBit   ? uvRunning   : true;
+
+  // --- AND / OR 判定 ---
+  if (logicOr) {
+    return pumpCond || uvCond;
+  } else {
+    return pumpCond && uvCond;
+  }
 }

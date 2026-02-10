@@ -40,7 +40,8 @@ static unsigned long uvCheckStartMs = 0;  // 点滅チェック開始時刻
 //  - false = OK
 //=========================================================
 static bool uvBroken[MAX_UV_LAMPS] = {false};
-static bool uvHalfBrokenWarning = false;         // ★追加★ UVランプの一部断線警告フラグ
+/* static */ bool uvHalfBrokenWarning = false;         // ★追加★ UVランプの一部断線警告フラグ
+
 // UV断線チェックを有効にするかどうか
 static bool uvFaultCheckEnabled = false;
 
@@ -276,16 +277,16 @@ void checkUvLampConnection() {
   // [追加] UV断線による警告ランプ制御
   //  - UVが有効なときのみ判定
   //=========================================================
-  if (uvFaultCheckEnabled) {
-    if (isUvFaultDetected()) {
-      digitalWrite(EM_LAMP_PIN, HIGH);
-    } else {
-      // ポンプ由来の警告が無いときだけ消灯
-      if (!pumpStartupError) {
-        digitalWrite(EM_LAMP_PIN, LOW);
-      }
-    }
-  }
+  // if (uvFaultCheckEnabled) {
+  //   if (isUvFaultDetected()) {
+  //     digitalWrite(EM_LAMP_PIN, HIGH);
+  //   } else {
+  //     // ポンプ由来の警告が無いときだけ消灯
+  //     if (!pumpStartupError) {
+  //       digitalWrite(EM_LAMP_PIN, LOW);
+  //     }
+  //   }
+  // }
 }
 
 // UVランプのスイッチ入力処理
@@ -300,7 +301,7 @@ void handleUvSwitchInputs() {
     uvFaultCheckEnabled = false;
 
     // ★追加★ UV関連警告は必ず消す
-    digitalWrite(EM_LAMP_PIN, LOW);
+    // digitalWrite(EM_LAMP_PIN, LOW);
 
     if (uvLampState == STATE_RUNNING) {
       uvLampState = STATE_STOPPED;
@@ -449,8 +450,15 @@ void uv_loop_task() {
   handleUvSwitchInputs();
   updateUvSystemState();
   checkUvLampConnection();
-  updateUvHalfBrokenWarning();   // ★追加
+  // updateUvHalfBrokenWarning();   // ★追加
+  // ★UV異常状態を更新
+  if (uvFaultCheckEnabled) {
+    uvHalfBrokenWarning = isUvFaultDetected();
+  } else {
+    uvHalfBrokenWarning = false;
+  }
 }
+
 bool is_uv_running() {
   // ランプがなければ、当然稼働していない
   if (numActiveUvLamps == 0) {
@@ -600,6 +608,7 @@ void uv_force_restore(bool run) {
     uvRelayForceOnForCheck = false;
   }
 }
+#if 0
 //=========================================================
 // [追加] UV左右筒の断線数カウント
 //=========================================================
@@ -622,18 +631,19 @@ static int countUvBrokenRight() {
   }
   return cnt;
 }
+#endif
 //=========================================================
 // [追加] 片側過半数断線判定
 //=========================================================
-static bool isUvHalfBroken(int brokenCount) {
-  int sideCount = numActiveUvLamps / 2;
-  return (brokenCount > (sideCount / 2));
-}
+// static bool isUvHalfBroken(int brokenCount) {
+//   int sideCount = numActiveUvLamps / 2;
+//   return (brokenCount > (sideCount / 2));
+// }
 //=========================================================
 // [追加] UV過半数断線警告の更新
 //=========================================================
 static void updateUvHalfBrokenWarning() {
-
+#if 0
   // UVが存在しない構成では警告しない
   if (numActiveUvLamps < 2) {
     uvHalfBrokenWarning = false;
@@ -646,42 +656,43 @@ static void updateUvHalfBrokenWarning() {
   uvHalfBrokenWarning =
     isUvHalfBroken(leftBroken) ||
     isUvHalfBroken(rightBroken);
+#endif
 }
 //=========================================================
 // [追加] UV左右筒ごとの過半数断線チェック
 //  - どちらか一方がNGなら true を返す
 //=========================================================
-static bool isUvHalfBroken() {
+// static bool isUvHalfBroken() {
 
-  int half = uvGroupSize();
-  if (half == 0) return false; // 念のため
+//   int half = uvGroupSize();
+//   if (half == 0) return false; // 念のため
 
-  int brokenA = 0;
-  int brokenB = 0;
+//   int brokenA = 0;
+//   int brokenB = 0;
 
-  // --- グループA ---
-  for (int i = 0; i < half; i++) {
-    if (!isUvSignalOk(uvInPins[i])) {
-      brokenA++;
-    }
-  }
+//   // --- グループA ---
+//   for (int i = 0; i < half; i++) {
+//     if (!isUvSignalOk(uvInPins[i])) {
+//       brokenA++;
+//     }
+//   }
 
-  // --- グループB ---
-  for (int i = half; i < numActiveUvLamps; i++) {
-    if (!isUvSignalOk(uvInPins[i])) {
-      brokenB++;
-    }
-  }
+//   // --- グループB ---
+//   for (int i = half; i < numActiveUvLamps; i++) {
+//     if (!isUvSignalOk(uvInPins[i])) {
+//       brokenB++;
+//     }
+//   }
 
-  // 過半数しきい値
-  int threshold = (half / 2) + 1;
+//   // 過半数しきい値
+//   int threshold = (half / 2) + 1;
 
-  if (brokenA >= threshold || brokenB >= threshold) {
-    return true;
-  }
+//   if (brokenA >= threshold || brokenB >= threshold) {
+//     return true;
+//   }
 
-  return false;
-}
+//   return false;
+// }
 //=========================================================
 // [改] DIP設定に応じたUV断線判定
 //=========================================================
