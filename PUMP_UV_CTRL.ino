@@ -1,4 +1,4 @@
-const char* FirmwareVersion = "20260206_R1";
+const char* FirmwareVersion = "20260210_R2";
 /**
  * @file dynamic_rpm_pump_controller.ino
  * @brief 統合・改良版 ポンプ＆UVランプコントローラー (ハードウェア自動検知版)
@@ -20,8 +20,8 @@ const char* FirmwareVersion = "20260206_R1";
  * [注意]ピン42, 43, A3～A7はプルアップ抵抗内蔵のINPUT_PULLUPモードで使用してください。
  */
 #define DEBUG_MODE          // デバッグ用シリアル出力を有効にする場合はコメントアウトを外す
-#define UV_DEBUG_MODE       // UV装置制御関連のデバッグ
-#define PU_DEBUG_MODE       // ポンプ制御関連のデバッグ
+// #define UV_DEBUG_MODE       // UV装置制御関連のデバッグ
+// #define PU_DEBUG_MODE       // ポンプ制御関連のデバッグ
 
 /*  ポンプ起動後電流が閾値に到達するまでの監視タイマー(秒)
     ポンプと水槽の距離によって変動させる必要があるが最大長さに合わせておくのもあり*/
@@ -300,6 +300,23 @@ struct PersistState {
 };
 
 PersistState persist;
+#if defined(DEBUG_MODE) || defined(UV_DEBUG_MODE) || defined(PU_DEBUG_MODE)
+//====================================================
+// [DEBUG] アワーメーターモードの意味文字列
+//====================================================
+static const char* hourModeToString(uint8_t mode) {
+  switch (mode & 0b111) {
+    case 0b110: return "PUMP_ONLY";
+    case 0b011: return "UV_ONLY";
+    case 0b100: return "PUMP_ON_UV_OFF";
+    case 0b001: return "PUMP_OFF_UV_ON";
+    case 0b101: return "PUMP_AND_UV";
+    case 0b111: return "PUMP_OR_UV";
+    case 0b000: return "DISABLED";
+    default:    return "UNDEF";
+  }
+}
+#endif
 
 // ----------------------------------------------------------------
 // setup() - 初期化処理
@@ -311,23 +328,23 @@ void setup() {
   DEBUG_PRINTLN("--- System Start ---");
   
   //====================================================
-  pinMode(DIP_SW1_PIN, INPUT);
-  pinMode(DIP_SW2_PIN, INPUT);
-  pinMode(DIP_SW3_PIN, INPUT);
-  pinMode(DIP_SW4_PIN, INPUT);
-  pinMode(DIP_SW5_PIN, INPUT);
-  pinMode(DIP_SW6_PIN, INPUT);
-  pinMode(DIP_SW7_PIN, INPUT);
+  pinMode(DIP_SW1_PIN, INPUT_PULLUP);
+  pinMode(DIP_SW2_PIN, INPUT_PULLUP);
+  pinMode(DIP_SW3_PIN, INPUT_PULLUP);
+  pinMode(DIP_SW4_PIN, INPUT_PULLUP);
+  pinMode(DIP_SW5_PIN, INPUT_PULLUP);
+  pinMode(DIP_SW6_PIN, INPUT_PULLUP);
+  pinMode(DIP_SW7_PIN, INPUT_PULLUP);
   delay(5); // プルアップが安定するのを待つ
-  cfg_restoreUvAfterPowerFail = (digitalRead(DIP_SW1_PIN) == LOW);
+  cfg_restoreUvAfterPowerFail = DIP_ON(DIP_SW1_PIN);
   // 例：DIP_SW2, DIP_SW3, DIP_SW4 を使用すると仮定
   cfg_hourMeterMode = 0;
-  if (digitalRead(DIP_SW2_PIN) == LOW) cfg_hourMeterMode |= 0b100; // Pump
-  if (digitalRead(DIP_SW3_PIN) == LOW) cfg_hourMeterMode |= 0b010; // AND/OR
-  if (digitalRead(DIP_SW4_PIN) == LOW) cfg_hourMeterMode |= 0b001; // UV
+  if (DIP_ON(DIP_SW2_PIN)) cfg_hourMeterMode |= 0b100; // Pump
+  if (DIP_ON(DIP_SW3_PIN)) cfg_hourMeterMode |= 0b010; // AND/OR
+  if (DIP_ON(DIP_SW4_PIN)) cfg_hourMeterMode |= 0b001; // UV
   // cfg_hourMeterIncludeUv      = (digitalRead(DIP_SW5_PIN) == LOW);
-  cfg_uvFaultAnyOneNg         = (digitalRead(DIP_SW6_PIN) == LOW);
-  cfg_uvAutoStart             = (digitalRead(DIP_SW7_PIN) == LOW);
+  cfg_uvFaultAnyOneNg         = DIP_ON(DIP_SW6_PIN);  // UV断線判定方式
+  cfg_uvAutoStart             = DIP_ON(DIP_SW7_PIN);
   DEBUG_PRINT("DIP_SW1 restore UV = ");
   DEBUG_PRINTLN(cfg_restoreUvAfterPowerFail ? "ON" : "OFF");
   DEBUG_PRINT("DIP_SW2 hourMeterIncludeUv = ");
@@ -486,6 +503,7 @@ void loop() {
   updateSystemState();          // ポンプの状態更新
   uv_loop_task();               // UV機能のループ処理を呼び出す
   updateTCntPin();              // ★★★ T_CNT_PINの状態を更新 ★★★
+  // debugPrintDipSwitches(); // デバッグ用：DIPスイッチの状態をシリアル出力
   updateDisplays();             // 3桁表示のため、1000以上は999として表示
   handleSerialCommunication();  // シリアルからのコマンド受信可否によるLED点灯消灯
   handlePeriodicTasks();        // タイマー処理でトリガーされる定期処理（コマンド送信、ピーク電流測定）
@@ -533,16 +551,18 @@ void updateTCntPin() {
   digitalWrite(T_CNT_PIN, hourOn ? HIGH : LOW);
 #ifdef DEBUG_MODE
   static unsigned long lastPrint = 0;
-  if (millis() - lastPrint > 2000) {
+  if (millis() - lastPrint > 3000) {
     lastPrint = millis();
     DEBUG_PRINT("HourMode=");
     DEBUG_PRINT(cfg_hourMeterMode, BIN);
-    DEBUG_PRINT(" pump=");
-    DEBUG_PRINT(pumpRunning);
+    DEBUG_PRINT(" [");
+    DEBUG_PRINT(hourModeToString(cfg_hourMeterMode));
+    DEBUG_PRINT("] pump=");
+    DEBUG_PRINT(pumpRunning ? "ON" : "OFF");
     DEBUG_PRINT(" uv=");
-    DEBUG_PRINT(uvRunning);
-    DEBUG_PRINT(" -> ");
-    DEBUG_PRINTLN(hourOn);
+    DEBUG_PRINT(uvRunning ? "ON" : "OFF");
+    DEBUG_PRINT(" => CNT=");
+    DEBUG_PRINTLN(hourOn ? "ON" : "OFF");
   }
 #endif
 
@@ -1684,3 +1704,29 @@ static bool evaluateHourMeterCondition(uint8_t modeBits,
     return pumpCond && uvCond;
   }
 }
+//====================================================
+// [DEBUG] DIPスイッチの生入力状態を表示
+//====================================================
+// void debugPrintDipSwitches() {
+// #ifdef DEBUG_MODE
+//   static unsigned long lastPrint = 0;
+//   if (millis() - lastPrint < 5000) return; // 3秒おき
+//   lastPrint = millis();
+
+//   DEBUG_PRINT("[DIP RAW] ");
+//   DEBUG_PRINT("SW1=");
+//   DEBUG_PRINT(digitalRead(DIP_SW1_PIN));
+//   DEBUG_PRINT(" SW2=");
+//   DEBUG_PRINT(digitalRead(DIP_SW2_PIN));
+//   DEBUG_PRINT(" SW3=");
+//   DEBUG_PRINT(digitalRead(DIP_SW3_PIN));
+//   DEBUG_PRINT(" SW4=");
+//   DEBUG_PRINT(digitalRead(DIP_SW4_PIN));
+//   DEBUG_PRINT(" SW5=");
+//   DEBUG_PRINT(digitalRead(DIP_SW5_PIN));
+//   DEBUG_PRINT(" SW6=");
+//   DEBUG_PRINT(digitalRead(DIP_SW6_PIN));
+//   DEBUG_PRINT(" SW7=");
+//   DEBUG_PRINTLN(digitalRead(DIP_SW7_PIN));
+// #endif
+// }

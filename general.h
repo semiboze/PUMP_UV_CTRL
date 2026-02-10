@@ -75,5 +75,8 @@ const int MAX_UV_LAMPS = 10;
 // 1: INPUT_PULLUP（抵抗なし検証用）
 #define UV_IN_USE_INTERNAL_PULLUP  0
 
+// ディップスイッチ読み出しマクロ (LOW=ON)今後変更したときにここだけ変えれば良いようににする
+#define DIP_ON(pin)  (digitalRead(pin) == LOW)
+
 #endif  // GENERAL_H_INCLUDED
 // --- ここまで共通型定義・共有シンボル宣言 ---
