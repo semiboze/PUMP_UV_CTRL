@@ -1,4 +1,4 @@
-const char* FirmwareVersion = "20260210_R2";
+const char* FirmwareVersion = "20260210_R3";
 /**
  * @file dynamic_rpm_pump_controller.ino
  * @brief 統合・改良版 ポンプ＆UVランプコントローラー (ハードウェア自動検知版)
@@ -115,6 +115,7 @@ bool cfg_restoreUvAfterPowerFail = false;
 uint8_t cfg_hourMeterMode;   // 3bit
 bool cfg_uvFaultAnyOneNg         = false;
 bool cfg_uvAutoStart             = false;
+static bool uvAutoStarted = false; // [DIP_SW7] UV自動起動用ラッチ
 
 // UVランプ装着数自動検知用のピン定義（4ビットバイナリ）ただし10本まで対応
 const int UV_DETECT_BIT0_PIN = A3; // 1加算 (2^0)
@@ -782,6 +783,7 @@ void stopPump() {
   PU_DEBUG_PRINTLN("Pump Stop Sequence Executed (lamp forced OFF).");
   persist.pump = 0;
   savePersistState();
+  uvAutoStarted = false;   // ★追加：次回起動に備えて解除
 }
 
 // スイッチ検出処理
@@ -907,13 +909,6 @@ void updateSystemState() {
 #endif
     }
 
-    // ★既存仕様★ 過電流保護（ロジック自体はそのまま維持） 閾値512とは判断データを分けるのでここを置換
-    // if (elapsedTimeSec > PUMP_TIMEOUT_SEC &&
-    //     lastCurrentPeak > PUMP_CURRENT_THRESHOLD) {
-    //   PU_DEBUG_PRINTLN("Pump stopped automatically due to over current.");
-    //   stopPump();
-    //   digitalWrite(EM_LAMP_PIN, HIGH); // 過電流でも非常停止ランプ点灯
-    // }
     // ★既存仕様★ 過電流保護（「しきい値」だけ分離して健全化）
     if (elapsedTimeSec > PUMP_TIMEOUT_SEC &&
         lastCurrentPeak > PUMP_OVERCURRENT_THRESHOLD) {
@@ -936,6 +931,26 @@ void updateSystemState() {
       digitalWrite(EM_LAMP_PIN, HIGH);
 #endif
     }
+
+    //====================================================
+// [DIP_SW7] UV自動起動（ポンプ起動後）
+//====================================================
+if (cfg_uvAutoStart &&
+    pumpState == STATE_RUNNING &&
+    !uvAutoStarted &&
+    !is_uv_running()) {
+
+  // ポンプ起動から1秒待つ
+  if (millis() - pumpStartTime >= 1000) {
+
+    // UVスタート相当の処理
+    uv_force_restore(true);
+
+    DEBUG_PRINTLN("[AUTO] UV auto-start by DIP_SW7");
+    uvAutoStarted = true;  // 二重起動防止
+  }
+}
+
   } else {
     digitalWrite(P_LAMP_PIN, LOW);
     // digitalWrite(LED_PUMP_RUN_PIN, LOW);
