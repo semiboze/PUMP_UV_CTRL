@@ -1,4 +1,4 @@
-const char* FirmwareVersion = "20260211_R2";
+const char* FirmwareVersion = "20260211_R4";
 /**
  * @file dynamic_rpm_pump_controller.ino
  * @brief 統合・改良版 ポンプ＆UVランプコントローラー (ハードウェア自動検知版)
@@ -96,9 +96,8 @@ const int RPM_ANALOG_IN_PIN = A0 ;       // 回転数調整ダイヤル可変抵
 const int CURRENT_ANALOG_IN_PIN = A1;    // ポンプの電流センサー接続ピン
 const int THRESHOLD_ANALOG_IN_PIN = A2;  // [変更点] 電流しきい値調整用のダイヤル可変抵抗を接続するアナログピン
 //==============================
-// DIPスイッチ GPIO割当
+// DIPスイッチ GPIO割当（A8〜A15）
 //==============================
-// DIPスイッチ（A8〜A15）
 const int DIP_SW1_PIN = A8;   // 停電復帰
 const int DIP_SW2_PIN = A9;   // HourMeter bit2 (Pump)
 const int DIP_SW3_PIN = A10;  // HourMeter bit1 (AND/OR)
@@ -191,16 +190,6 @@ struct Switch {
   int lastReading, stableState;
   unsigned long lastDebounceTime;
 };
-// チャタリング対策付きスイッチ
-// ===== 暫定：Switch が見えていない場合の応急定義 =====
-// typedef struct {
-//   uint8_t pin;
-//   bool    active_low;          // trueならLOWが押下
-//   uint16_t debounce_ms;        // チャタリング
-//   bool    last_raw;
-//   bool    stable;
-//   unsigned long last_change_ms;
-// } Switch;
 
 Switch pumpStartSwitch = {P_SW_START_PIN, HIGH, HIGH, 0};
 Switch pumpStopSwitch  = {P_SW_STOP_PIN,  HIGH, HIGH, 0};
@@ -209,7 +198,6 @@ Switch pumpStopSwitch  = {P_SW_STOP_PIN,  HIGH, HIGH, 0};
 void initializePins();            // ピンの初期化
 void initializeDisplays();        // TM1637ディスプレイの初期化
 void timerInterrupt();            // タイマー割り込み処理
-// bool isButtonPressed(Switch &sw); // スイッチのチャタリング防止付き押下検出
 void handleSwitchInputs();        // スイッチ入力処理
 void updateSystemState();         // ポンプとUVランプの状態更新
 void updateDisplays();            // 3桁表示のため、1000以上は999として表示
@@ -515,31 +503,7 @@ void loop() {
   updateInputFeedbackLed();     // スイッチ押下中LEDの更新
 }
 
-// ================================================================
-// 機能別関数
-// ================================================================
-
-// ★★★ T_CNT_PINの出力を制御する新設関数 ★★★
-// void updateTCntPin() {
-
-//   //====================================================
-//   // [改善] アワーメーターは「状態」ではなく「運転指令」で回す
-//   //====================================================
-//   bool isUvRunning = is_uv_running();
-
-//   // RPMコマンドが一定時間来ていないなら落とす（安全側）
-//   // ※継続送信間隔が300msなので、3秒以上来ないなら異常とみなす例
-//   const unsigned long RPM_WATCHDOG_MS = 3000;
-//   if (pumpRunCommandActive && (millis() - lastRpmCommandMs > RPM_WATCHDOG_MS)) {
-//     pumpRunCommandActive = false;
-//   }
-
-//   if (pumpRunCommandActive || isUvRunning) {
-//     digitalWrite(T_CNT_PIN, HIGH);
-//   } else {
-//     digitalWrite(T_CNT_PIN, LOW);
-//   }
-// }
+// ★★★ T_CNT_PINの状態を更新する関数 ★★★
 void updateTCntPin() {
   bool pumpRunning = pumpRunCommandActive;
   bool uvRunning   = is_uv_running();
@@ -590,8 +554,7 @@ void initializePins() {
   pinMode(P_SW_STOP_PIN, INPUT_PULLUP);
   pinMode(EM_LAMP_PIN, OUTPUT);
   pinMode(P_LAMP_PIN, OUTPUT);
-  // pinMode(LED_PUMP_RUN_PIN, OUTPUT);
-  // pinMode(LED_PUMP_STOP_PIN, OUTPUT);
+ 
   pinMode(LED_ISR_PIN, OUTPUT);
   
   pinMode(LED_SERIAL_RX_PIN, OUTPUT);
@@ -618,26 +581,7 @@ void initializeDisplays() {
   tm3_cur_pea.clearDisplay();
 }
 
-// チャタリング防止付きスイッチ押下検出 2026-01-08 コメント化
-// bool isButtonPressed(Switch &sw) {
-//   int currentReading = digitalRead(sw.pin);
-//   if (currentReading != sw.lastReading) {
-//     sw.lastDebounceTime = millis();
-//   }
-  
-//   if ((millis() - sw.lastDebounceTime) > DEBOUNCE_DELAY_MS) {
-//     if (currentReading != sw.stableState) {
-//       sw.stableState = currentReading;
-//       if (sw.stableState == LOW) {
-//         sw.lastReading = currentReading;
-//         return true;
-//       } 
-//     } 
-//   } 
-  
-//   sw.lastReading = currentReading;
-//   return false;
-// }
+// スイッチのチャタリング防止付き押下検出
 bool isButtonPressed(Switch &sw) {
   // INPUT_PULLUP 前提：押すと LOW
   bool current = digitalRead(sw.pin);
@@ -683,7 +627,6 @@ void sendStopCommand() {
 }
 
 void sendRpmCommand(int rpm) {
-
   //====================================================
   // 最低回転数ガード（500rpm未満は仕様上「停止」扱い）
   //====================================================
@@ -707,42 +650,6 @@ void sendRpmCommand(int rpm) {
   lastRpmCommandMs = millis();
 }
 
-// ============================================================
-// ★追加★ 固定コード確認コマンド(0x00) 送信
-// 仕様書：電源投入後最低1度は送信。リターンがあるまで再送。:contentReference[oaicite:7]{index=7}
-// ============================================================
-
-// 確認完了フラグ（ACKが取れたらtrueにする）
-// volatile bool inverter_confirmed = false;
-
-// 9バイト送信（確認コマンド用）
-// void pump_write9(const uint8_t cmd[9], const char* label) {
-//   PU_DEBUG_PRINTLN("pump_write9() called.");
-//   PUMP_SERIAL.write(cmd, 9);
-
-//   // デバッグ表示（任意）
-//   PU_DEBUG_PRINT("[PUMP] ");
-//   PU_DEBUG_PRINT(label);
-//   PU_DEBUG_PRINT(" : ");
-//   for (int i = 0; i < 9; i++) {
-//     if (cmd[i] < 0x10) PU_DEBUG_PRINT('0');
-//     PU_DEBUG_PRINT(cmd[i], HEX);
-//     PU_DEBUG_PRINT(' ');
-//   }
-//   PU_DEBUG_PRINTLN();
-// }
-
-// チェックサム：D0～D8の総和が0x55になるようにする
-// void sendConfirmCommand() {
-//   // 仕様書の例そのまま（最後はchecksum=0x38）
-//   uint8_t cmd[9] = {0x00, 0x01, 0x00, 0x03, 0x01, 0x12, 0x00, 0x06, 0x00};
-
-//   uint8_t sum = 0;
-//   for (int i = 0; i < 8; i++) sum += cmd[i];
-//   cmd[8] = (uint8_t)(0x55 - sum);
-
-//   pump_write9(cmd, "CONFIRM");
-// }
 //====================================================
 // [CONFIRM] 固定コード確認コマンド
 // - 仕様書の例に合わせた9バイト
@@ -879,9 +786,6 @@ void updateSystemState() {
 
   if (pumpState == STATE_RUNNING) {
     digitalWrite(P_LAMP_PIN, HIGH);
-    // digitalWrite(LED_PUMP_RUN_PIN, HIGH);
-    // digitalWrite(LED_PUMP_STOP_PIN, LOW);
-
     unsigned long elapsedTimeSec = (millis() - pumpStartTime) / 1000UL;
 
     // ★追加★ 起動後120秒以内にしきい値に達しなかった場合の「低電流エラー」 2025-12-09
@@ -1111,14 +1015,6 @@ void handlePeriodicTasks() {
     if (pumpState == STATE_RUNNING) {
       sendRpmCommand(rpm_value);
     }else{
-      // // ポンプ停止中は回転数0のコマンドを送信する
-      // byte stop_command[8] = {0x00, 0x01, 0x10, 0x02, 0x00, 0x01, 0x00, 0x00};
-      // byte sum = 0;
-      // for(int i=0; i < 7; i++) {
-      //   sum += stop_command[i];
-      // }
-      // stop_command[7] = 0x55 - sum; // チェックサムを計算
-      // PUMP_SERIAL.write(stop_command, 8);
     }
   }
 }
@@ -1129,6 +1025,8 @@ void handlePeriodicTasks() {
 // まずは10で試し、効きが弱い/強すぎる場合は5〜20の範囲で調整してみてください。
 const int MOVING_AVG_SIZE = 10;
 
+#if CURRENT_SIMULATION == 0
+#else
 //====================================================
 // [追加] 電流センサー読み取り統一窓口
 // - 実機 : analogRead(A1)
@@ -1180,7 +1078,7 @@ static const uint16_t* getSimPeakTable(size_t &len) {
   return SIM_PEAKS_NG;
 #endif
 }
-
+#endif
 //----------------------------------------------------
 // 擬似電流値を生成して返す
 // ・あなたのピーク検出は「1.5秒ごとの最大」を拾うので、
@@ -1436,7 +1334,6 @@ int getTargetRpm() {
   }
 }
 
-// ▼▼▼ ここから追加 ▼▼▼
 /**
  * @brief 配列を小さい順に並べ替える（バブルソート）
  * @param arr 並べ替える配列
@@ -1729,30 +1626,3 @@ static bool evaluateHourMeterCondition(uint8_t modeBits,
       return false;
   }
 }
-
-//====================================================
-// [DEBUG] DIPスイッチの生入力状態を表示
-//====================================================
-// void debugPrintDipSwitches() {
-// #ifdef DEBUG_MODE
-//   static unsigned long lastPrint = 0;
-//   if (millis() - lastPrint < 5000) return; // 3秒おき
-//   lastPrint = millis();
-
-//   DEBUG_PRINT("[DIP RAW] ");
-//   DEBUG_PRINT("SW1=");
-//   DEBUG_PRINT(digitalRead(DIP_SW1_PIN));
-//   DEBUG_PRINT(" SW2=");
-//   DEBUG_PRINT(digitalRead(DIP_SW2_PIN));
-//   DEBUG_PRINT(" SW3=");
-//   DEBUG_PRINT(digitalRead(DIP_SW3_PIN));
-//   DEBUG_PRINT(" SW4=");
-//   DEBUG_PRINT(digitalRead(DIP_SW4_PIN));
-//   DEBUG_PRINT(" SW5=");
-//   DEBUG_PRINT(digitalRead(DIP_SW5_PIN));
-//   DEBUG_PRINT(" SW6=");
-//   DEBUG_PRINT(digitalRead(DIP_SW6_PIN));
-//   DEBUG_PRINT(" SW7=");
-//   DEBUG_PRINTLN(digitalRead(DIP_SW7_PIN));
-// #endif
-// }

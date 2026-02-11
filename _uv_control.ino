@@ -90,30 +90,6 @@ const int UV_OUT_10_PIN     = 39; // UVランプ10基目のパイロットラン
 const int UV_GROUP_A_PIN    = 40; // UVランプグループA制御ピン
 const int UV_GROUP_B_PIN    = 41; // UVランプグループB制御ピン
 const int LED_UV_RUN_PIN    = 47; // 操作盤の稼働灯(現在ハード未実装)
-// const int LED_UV_STOP_PIN   = 48; //操作盤の稼働灯・停止灯
-//const int RPM_ANALOG_IN_PIN     = 0; // 可変抵抗 (ポテンショメーター) 接続ピン 
-//const int CURRENT_ANALOG_IN_PIN = 1; // ポンプの電流センサー接続ピン
-//const int P_SW_START_PIN        = 2; // ポンプ起動スイッチ接続ピン
-//const int P_SW_STOP_PIN         = 3; // ポンプ停止スイッチ接続ピン
-//const int P_LAMP_PIN            = 4; // ポンプ運転表示ランプ接続ピン
-//const int UV_SW_START_PIN       = 5; // UVランプ起動スイッチ接続ピン
-//const int UV_SW_STOP_PIN        = 6; // UVランプ停止スイッチ接続ピン
-//const int UV_LAMP_PIN           = 7; // UVランプ運転表示ランプ接続ピン
-//const int EM_LAMP_PIN           = 8; // 電磁弁表示ランプ接続ピン
-//const int T_CNT_PIN             = 9; // UVランプタイマー接続ピン
-//const int PIN_CLK1              = 12; // TM1637 1 (回転数表示) 接続ピン
-//const int PIN_DIO1              = 13; // TM1637 1 (回転数表示) 接続ピン
-//const int PIN_CLK2              = 14; // TM1637 2 (電流表示) 接続ピン
-//const int PIN_DIO2              = 15; // TM1637 2 (電流表示) 接続ピン
-//const int PIN_CLK3              = 16; // TM1637 3 (タイマー表示) 接続ピン
-//const int PIN_DIO3              = 17; // TM1637 3 (タイマー表示) 接続ピン
-// const int THERESHOLD_HARD_CODE = 42; // アナログダイヤルで閾値調整する場合このピンをGNDに落とす
-// const int LED_PUMP_RUN_PIN      = 45; 
-// const int LED_PUMP_STOP_PIN     = 46;
-//const int LED_UV_RUN_PIN        = 47; // 操作盤の稼働灯
-//const int LED_UV_STOP_PIN       = 48; //操作盤の稼働灯・停止灯
-//const int LED_ISR_PIN           = 49; // タイマー割り込み動作確認用LED
-//const int LED_SERIAL_RX_PIN     = 50; // シリアル受信確認用LED
 
 // 対応する可能性のある最大ランプ数でピン配列を定義しておく
 const int uvInPins[MAX_UV_LAMPS] = {
@@ -287,20 +263,6 @@ void checkUvLampConnection() {
     }
     UV_DEBUG_PRINTLN("");
   }
-  //=========================================================
-  // [追加] UV断線による警告ランプ制御
-  //  - UVが有効なときのみ判定
-  //=========================================================
-  // if (uvFaultCheckEnabled) {
-  //   if (isUvFaultDetected()) {
-  //     digitalWrite(EM_LAMP_PIN, HIGH);
-  //   } else {
-  //     // ポンプ由来の警告が無いときだけ消灯
-  //     if (!pumpStartupError) {
-  //       digitalWrite(EM_LAMP_PIN, LOW);
-  //     }
-  //   }
-  // }
 }
 
 // UVランプのスイッチ入力処理
@@ -337,7 +299,6 @@ void handleUvSwitchInputs() {
     for (int i = 0; i < numActiveUvLamps; i++) {
       digitalWrite(uvOutPins[i], LOW);
     }
-
     return;
   }
 
@@ -466,10 +427,18 @@ void uv_loop_task() {
   handleUvSwitchInputs();
   updateUvSystemState();
   checkUvLampConnection();
-  // updateUvHalfBrokenWarning();   // ★追加
-  // ★UV異常状態を更新
+  //====================================================
+  // UV断線警告更新（起動直後は無効化）
+  //====================================================
   if (uvFaultCheckEnabled) {
-    uvHalfBrokenWarning = isUvFaultDetected();
+    // ★起動猶予中は断線警告を出さない
+    if (millis() - uvCheckStartMs < UV_FAULT_IGNORE_MS) {
+      uvHalfBrokenWarning = false;
+    }
+    else {
+      uvHalfBrokenWarning = isUvFaultDetected();
+    }
+
   } else {
     uvHalfBrokenWarning = false;
   }
@@ -633,91 +602,7 @@ void uv_force_restore(bool run) {
     uvRelayForceOnForCheck = false;
   }
 }
-#if 0
-//=========================================================
-// [追加] UV左右筒の断線数カウント
-//=========================================================
-static int countUvBrokenLeft() {
-  int cnt = 0;
-  int sideCount = numActiveUvLamps / 2;
 
-  for (int i = 0; i < sideCount; i++) {
-    if (uvBroken[i]) cnt++;
-  }
-  return cnt;
-}
-
-static int countUvBrokenRight() {
-  int cnt = 0;
-  int sideCount = numActiveUvLamps / 2;
-
-  for (int i = sideCount; i < numActiveUvLamps; i++) {
-    if (uvBroken[i]) cnt++;
-  }
-  return cnt;
-}
-#endif
-//=========================================================
-// [追加] 片側過半数断線判定
-//=========================================================
-// static bool isUvHalfBroken(int brokenCount) {
-//   int sideCount = numActiveUvLamps / 2;
-//   return (brokenCount > (sideCount / 2));
-// }
-//=========================================================
-// [追加] UV過半数断線警告の更新
-//=========================================================
-static void updateUvHalfBrokenWarning() {
-#if 0
-  // UVが存在しない構成では警告しない
-  if (numActiveUvLamps < 2) {
-    uvHalfBrokenWarning = false;
-    return;
-  }
-
-  int leftBroken  = countUvBrokenLeft();
-  int rightBroken = countUvBrokenRight();
-
-  uvHalfBrokenWarning =
-    isUvHalfBroken(leftBroken) ||
-    isUvHalfBroken(rightBroken);
-#endif
-}
-//=========================================================
-// [追加] UV左右筒ごとの過半数断線チェック
-//  - どちらか一方がNGなら true を返す
-//=========================================================
-// static bool isUvHalfBroken() {
-
-//   int half = uvGroupSize();
-//   if (half == 0) return false; // 念のため
-
-//   int brokenA = 0;
-//   int brokenB = 0;
-
-//   // --- グループA ---
-//   for (int i = 0; i < half; i++) {
-//     if (!isUvSignalOk(uvInPins[i])) {
-//       brokenA++;
-//     }
-//   }
-
-//   // --- グループB ---
-//   for (int i = half; i < numActiveUvLamps; i++) {
-//     if (!isUvSignalOk(uvInPins[i])) {
-//       brokenB++;
-//     }
-//   }
-
-//   // 過半数しきい値
-//   int threshold = (half / 2) + 1;
-
-//   if (brokenA >= threshold || brokenB >= threshold) {
-//     return true;
-//   }
-
-//   return false;
-// }
 //=========================================================
 // [改] DIP設定に応じたUV断線判定
 //=========================================================
