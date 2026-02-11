@@ -1,4 +1,4 @@
-const char* FirmwareVersion = "20260210_R3";
+const char* FirmwareVersion = "20260211_R2";
 /**
  * @file dynamic_rpm_pump_controller.ino
  * @brief 統合・改良版 ポンプ＆UVランプコントローラー (ハードウェア自動検知版)
@@ -307,13 +307,14 @@ PersistState persist;
 //====================================================
 static const char* hourModeToString(uint8_t mode) {
   switch (mode & 0b111) {
-    case 0b110: return "PUMP_ONLY";
-    case 0b011: return "UV_ONLY";
-    case 0b100: return "PUMP_ON_UV_OFF";
-    case 0b001: return "PUMP_OFF_UV_ON";
-    case 0b101: return "PUMP_AND_UV";
-    case 0b111: return "PUMP_OR_UV";
+    case 0b110: return "PUMP_ON_UV_OFF";
+    case 0b011: return "PUMP_OFF_UV_ON";
+    case 0b100: return "PUMP_ONLY";
+    case 0b001: return "UV_ONLY";
+    case 0b101: return "PUMP_OR_UV";
+    case 0b111: return "PUMP_AND_UV";
     case 0b000: return "DISABLED";
+    case 0b010: return "OFF_AND_OFF";
     default:    return "UNDEF";
   }
 }
@@ -1691,34 +1692,44 @@ void savePersistState() {
 //====================================================
 // [追加] アワーメーター判定ロジック（3bit DIP対応）
 // bit2 : Pump条件
-// bit1 : 0=AND / 1=OR
+// bit1 : 1=AND / 0=OR
 // bit0 : UV条件
 //====================================================
 static bool evaluateHourMeterCondition(uint8_t modeBits,
                                        bool pumpRunning,
                                        bool uvRunning)
 {
-  // --- ビット展開 ---
-  bool pumpBit = (modeBits & 0b100) != 0;
-  bool logicOr = (modeBits & 0b010) != 0;
-  bool uvBit   = (modeBits & 0b001) != 0;
+  uint8_t mode = modeBits & 0b111;
 
-  // --- 各条件の評価 ---
-  // pumpBit = 1 → pumpRunning を使う
-  // pumpBit = 0 → pumpRunning を無視（true扱い）
-  bool pumpCond = pumpBit ? pumpRunning : true;
+  switch (mode) {
 
-  // uvBit = 1 → uvRunning を使う
-  // uvBit = 0 → uvRunning を無視（true扱い）
-  bool uvCond   = uvBit   ? uvRunning   : true;
+    case 0b111:  // 稼働 かつ 稼働
+      return (pumpRunning && uvRunning);
 
-  // --- AND / OR 判定 ---
-  if (logicOr) {
-    return pumpCond || uvCond;
-  } else {
-    return pumpCond && uvCond;
+    case 0b101:  // 稼働 または 稼働
+      return (pumpRunning || uvRunning);
+
+    case 0b110:  // 稼働 かつ 停止
+      return (pumpRunning && !uvRunning);
+
+    case 0b011:  // 停止 かつ 稼働
+      return (!pumpRunning && uvRunning);
+
+    case 0b100:  // ポンプのみ（UV無関係）
+      return pumpRunning;
+
+    case 0b001:  // UVのみ（ポンプ無関係）
+      return uvRunning;
+
+    case 0b010:  // 停止 かつ 停止
+      return (!pumpRunning && !uvRunning);
+
+    case 0b000:  // 無効
+    default:
+      return false;
   }
 }
+
 //====================================================
 // [DEBUG] DIPスイッチの生入力状態を表示
 //====================================================

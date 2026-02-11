@@ -44,6 +44,8 @@ static bool uvBroken[MAX_UV_LAMPS] = {false};
 
 // UV断線チェックを有効にするかどうか
 static bool uvFaultCheckEnabled = false;
+// UV起動直後は断線判定を行わない猶予時間
+const unsigned long UV_FAULT_IGNORE_MS = 5000; // 5秒推奨
 
 //=========================================================
 // [追加] UV入力の「接続/断線/浮き」を外付け抵抗なしで判定する
@@ -201,6 +203,18 @@ void checkUvLampConnection() {
   if (!uvFaultCheckEnabled) {
     return;
   }
+
+  // ★★★ 起動直後の断線判定猶予 ★★★
+  if (millis() - uvCheckStartMs < UV_FAULT_IGNORE_MS) {
+
+    // 表示を「確定状態」に固定する（点滅させない）
+    for (int i = 0; i < numActiveUvLamps; i++) {
+      digitalWrite(uvOutPins[i], HIGH); // ← 全点灯推奨
+      uvNgLatchUntilMs[i] = 0;          // ★NGラッチ完全クリア
+    }
+    return;
+  }
+
   // チェック開始直後はUV側信号が安定しないので待つ
   if (uvMissingBlinkActive && (millis() - uvCheckStartMs < 3000)) {
     for (int i = 0; i < numActiveUvLamps; i++) {
@@ -332,6 +346,8 @@ void handleUvSwitchInputs() {
   //=========================================================
   if (isButtonPressed(uvStartSwitch)) {
     uvRunLampLatched = true;
+    // ★断線チェック開始時刻を記録
+    uvCheckStartMs = millis();
 
     // ★追加★ UV断線チェックを開始
     uvFaultCheckEnabled = true;
@@ -460,11 +476,20 @@ void uv_loop_task() {
 }
 
 bool is_uv_running() {
-  // ランプがなければ、当然稼働していない
   if (numActiveUvLamps == 0) {
     return false;
   }
-  return (uvLampState == STATE_RUNNING);
+
+  // ★リレーON中も「運転扱い」にする
+  if (uvLampState == STATE_RUNNING) {
+    return true;
+  }
+
+  if (uvRelayForceOnForCheck) {
+    return true;
+  }
+
+  return false;
 }
 
 // ... (is_uv_running() 関数の下など、ファイルの末尾に) ...
