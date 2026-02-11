@@ -33,7 +33,17 @@ static bool uvRelayForceOnForCheck = false;
 //=========================================================
 static bool uvRunLampLatched = false;
 
-static unsigned long uvCheckStartMs = 0;
+static unsigned long uvCheckStartMs = 0;  // 点滅チェック開始時刻
+//=========================================================
+// [追加] UV断線状態の保持用
+//  - true  = NG（断線/浮き）
+//  - false = OK
+//=========================================================
+static bool uvBroken[MAX_UV_LAMPS] = {false};
+/* static */ bool uvHalfBrokenWarning = false;         // ★追加★ UVランプの一部断線警告フラグ
+
+// UV断線チェックを有効にするかどうか
+static bool uvFaultCheckEnabled = false;
 
 //=========================================================
 // [追加] UV入力の「接続/断線/浮き」を外付け抵抗なしで判定する
@@ -130,6 +140,13 @@ Switch uvStartSwitch   = {UV_SW_START_PIN,  HIGH, HIGH, 0};
 Switch uvStopSwitch    = {UV_SW_STOP_PIN,   HIGH, HIGH, 0};
 
 //=========================================================
+// UVグループ境界
+//=========================================================
+static inline int uvGroupSize() {
+  return numActiveUvLamps / 2;
+}
+
+//=========================================================
 // [改] 外付け抵抗なしでも「未接続(浮き)」をNGにするUV入力判定
 //  - 目的：未接続チャンネル(浮き)を「OK」と誤判定させない
 //  - 方法：プルアップ無し/有りで2回読んで「浮き」を推定
@@ -180,6 +197,10 @@ static void driveUvIndicator(int idx, bool okNow) {
 
 // UVランプ接続チェック関数
 void checkUvLampConnection() {
+  // ★ガード★ UVが有効でないときは何もしない
+  if (!uvFaultCheckEnabled) {
+    return;
+  }
   // チェック開始直後はUV側信号が安定しないので待つ
   if (uvMissingBlinkActive && (millis() - uvCheckStartMs < 3000)) {
     for (int i = 0; i < numActiveUvLamps; i++) {
@@ -239,6 +260,12 @@ void checkUvLampConnection() {
     UV_DEBUG_PRINT("UV Lamps Status ");
     for (int i = 0; i < numActiveUvLamps; i++) {
       bool ok = isUvSignalOk(uvInPins[i]);
+
+      // ★追加★ UV断線状態を保持（警告判定用）
+      uvBroken[i] = !ok;
+
+      driveUvIndicator(i, ok);
+
       UV_DEBUG_PRINT(i + 1);
       UV_DEBUG_PRINT(":");
       UV_DEBUG_PRINT(ok ? "OK" : "NG");
@@ -246,6 +273,20 @@ void checkUvLampConnection() {
     }
     UV_DEBUG_PRINTLN("");
   }
+  //=========================================================
+  // [追加] UV断線による警告ランプ制御
+  //  - UVが有効なときのみ判定
+  //=========================================================
+  // if (uvFaultCheckEnabled) {
+  //   if (isUvFaultDetected()) {
+  //     digitalWrite(EM_LAMP_PIN, HIGH);
+  //   } else {
+  //     // ポンプ由来の警告が無いときだけ消灯
+  //     if (!pumpStartupError) {
+  //       digitalWrite(EM_LAMP_PIN, LOW);
+  //     }
+  //   }
+  // }
 }
 
 // UVランプのスイッチ入力処理
@@ -255,6 +296,12 @@ void handleUvSwitchInputs() {
   // [STOP] 最優先：STOPで全部解除
   //=========================================================
   if (isButtonPressed(uvStopSwitch)) {
+
+    // ★追加★ UV断線チェック停止
+    uvFaultCheckEnabled = false;
+
+    // ★追加★ UV関連警告は必ず消す
+    // digitalWrite(EM_LAMP_PIN, LOW);
 
     if (uvLampState == STATE_RUNNING) {
       uvLampState = STATE_STOPPED;
@@ -284,9 +331,11 @@ void handleUvSwitchInputs() {
   // [START] START押下
   //=========================================================
   if (isButtonPressed(uvStartSwitch)) {
-
-    // ★追加★：Startを押したら「運転ランプ」だけは必ず点灯開始（Stopまで保持）
     uvRunLampLatched = true;
+
+    // ★追加★ UV断線チェックを開始
+    uvFaultCheckEnabled = true;
+
     UV_DEBUG_PRINT("START PIN28 mode=");
     UV_DEBUG_PRINT(digitalRead(28));
     UV_DEBUG_PRINT("   PIN29 mode=");
@@ -401,7 +450,15 @@ void uv_loop_task() {
   handleUvSwitchInputs();
   updateUvSystemState();
   checkUvLampConnection();
+  // updateUvHalfBrokenWarning();   // ★追加
+  // ★UV異常状態を更新
+  if (uvFaultCheckEnabled) {
+    uvHalfBrokenWarning = isUvFaultDetected();
+  } else {
+    uvHalfBrokenWarning = false;
+  }
 }
+
 bool is_uv_running() {
   // ランプがなければ、当然稼働していない
   if (numActiveUvLamps == 0) {
@@ -541,6 +598,7 @@ static UvSense readUvSenseNoResistor(int pin) {
 void uv_force_restore(bool run) {
   if (run) {
     uvLampState = STATE_RUNNING;
+    uvFaultCheckEnabled = true;   // ★追加★
     uvRunLampLatched = true;      // ★必須
     uvMissingBlinkActive = false;
     uvRelayForceOnForCheck = false;
@@ -549,4 +607,116 @@ void uv_force_restore(bool run) {
     uvRunLampLatched = false;
     uvRelayForceOnForCheck = false;
   }
+}
+#if 0
+//=========================================================
+// [追加] UV左右筒の断線数カウント
+//=========================================================
+static int countUvBrokenLeft() {
+  int cnt = 0;
+  int sideCount = numActiveUvLamps / 2;
+
+  for (int i = 0; i < sideCount; i++) {
+    if (uvBroken[i]) cnt++;
+  }
+  return cnt;
+}
+
+static int countUvBrokenRight() {
+  int cnt = 0;
+  int sideCount = numActiveUvLamps / 2;
+
+  for (int i = sideCount; i < numActiveUvLamps; i++) {
+    if (uvBroken[i]) cnt++;
+  }
+  return cnt;
+}
+#endif
+//=========================================================
+// [追加] 片側過半数断線判定
+//=========================================================
+// static bool isUvHalfBroken(int brokenCount) {
+//   int sideCount = numActiveUvLamps / 2;
+//   return (brokenCount > (sideCount / 2));
+// }
+//=========================================================
+// [追加] UV過半数断線警告の更新
+//=========================================================
+static void updateUvHalfBrokenWarning() {
+#if 0
+  // UVが存在しない構成では警告しない
+  if (numActiveUvLamps < 2) {
+    uvHalfBrokenWarning = false;
+    return;
+  }
+
+  int leftBroken  = countUvBrokenLeft();
+  int rightBroken = countUvBrokenRight();
+
+  uvHalfBrokenWarning =
+    isUvHalfBroken(leftBroken) ||
+    isUvHalfBroken(rightBroken);
+#endif
+}
+//=========================================================
+// [追加] UV左右筒ごとの過半数断線チェック
+//  - どちらか一方がNGなら true を返す
+//=========================================================
+// static bool isUvHalfBroken() {
+
+//   int half = uvGroupSize();
+//   if (half == 0) return false; // 念のため
+
+//   int brokenA = 0;
+//   int brokenB = 0;
+
+//   // --- グループA ---
+//   for (int i = 0; i < half; i++) {
+//     if (!isUvSignalOk(uvInPins[i])) {
+//       brokenA++;
+//     }
+//   }
+
+//   // --- グループB ---
+//   for (int i = half; i < numActiveUvLamps; i++) {
+//     if (!isUvSignalOk(uvInPins[i])) {
+//       brokenB++;
+//     }
+//   }
+
+//   // 過半数しきい値
+//   int threshold = (half / 2) + 1;
+
+//   if (brokenA >= threshold || brokenB >= threshold) {
+//     return true;
+//   }
+
+//   return false;
+// }
+//=========================================================
+// [改] DIP設定に応じたUV断線判定
+//=========================================================
+static bool isUvFaultDetected() {
+
+  int half = uvGroupSize();
+  if (half == 0) return false;
+
+  int brokenA = 0;
+  int brokenB = 0;
+
+  for (int i = 0; i < half; i++) {
+    if (!isUvSignalOk(uvInPins[i])) brokenA++;
+  }
+  for (int i = half; i < numActiveUvLamps; i++) {
+    if (!isUvSignalOk(uvInPins[i])) brokenB++;
+  }
+
+  // DIP_SW3 = ON → 1本でもNG
+  if (cfg_uvFaultAnyOneNg) {
+    return (brokenA > 0 || brokenB > 0);
+  }
+
+  // DIP_SW3 = OFF → 過半数
+  int threshold = (half / 2) + 1;
+  return (brokenA >= threshold || brokenB >= threshold);
 }
